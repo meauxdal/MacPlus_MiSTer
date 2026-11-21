@@ -73,6 +73,7 @@ module floppy
 	input _enable,
 	input [7:0] writeData,
 	output [7:0] readData,
+	output reg readTransition, // 0.5 us pulse for each serialized one bit
 
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
@@ -347,11 +348,13 @@ module floppy
 	// The CPU must poll for data at least this often, or else an overrun will occur.
 	reg [6:0] diskDataByteTimer; 
 	reg [7:0] diskImageData;	
+	reg       diskImageDataValid;
 	reg readyToAdvanceHead;
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 0) begin		
 			driveSide <= 0;
 			diskImageData <= 8'h00;
+			diskImageDataValid <= 1'b0;
 			diskDataIn <= 8'hFF;
 			diskDataByteTimer <= 0;
 			readyToAdvanceHead <= 1;
@@ -360,13 +363,14 @@ module floppy
 		else begin			
 			if(cep) begin
 			// at time 0, latch a new byte and advance the drive head
-			if (diskDataByteTimer == 0 && readyToAdvanceHead && diskImageData != 0) begin
+			if (diskDataByteTimer == 0 && readyToAdvanceHead && diskImageDataValid) begin
 				diskDataIn <= diskImageData;
 				newByteReady <= 1;
 				diskDataByteTimer <= 1;  // make timer run again
 
 				// clear diskImageData after it's used, so we can tell when we get a new one from the disk	
 				diskImageData <= 0;
+				diskImageDataValid <= 1'b0;
 
 				// for debugging, don't advance the head until the IWM says it's ready
 				readyToAdvanceHead <= 1'b1; // TEMP: treat IWM as always ready
@@ -383,6 +387,7 @@ module floppy
 				if (dskReadAck) begin
 					// whenever ACK is received, store the data from the current diskImageAddr 
 					diskImageData <= dskReadDataEnc;  // xyz
+					diskImageDataValid <= 1'b1;
  				end
 
 				if (advanceDriveHead) begin
@@ -399,6 +404,59 @@ module floppy
 				driveSide <= 1;	
 		end
 	end
+	end
+
+	// The IWM sees flux transitions, not a byte-ready strobe. The sector-image
+	// path supplies one encoded byte every 128 clk8 enables (16 us); serialize
+	// it into 2 us cells and emit a 0.5 us pulse for each one bit. A MOOF player
+	// can later drive this transition interface with its own timing.
+	reg [7:0] transitionShift;
+	reg [2:0] transitionBit;
+	reg [3:0] transitionCell;
+	reg [2:0] transitionPulseCount;
+	reg       transitionActive;
+	always @(posedge clk or negedge _reset) begin
+		if (!_reset) begin
+			transitionShift      <= 8'd0;
+			transitionBit        <= 3'd0;
+			transitionCell       <= 4'd0;
+			transitionPulseCount <= 3'd0;
+			transitionActive     <= 1'b0;
+			readTransition       <= 1'b0;
+		end else if (writePathReset) begin
+			transitionShift      <= 8'd0;
+			transitionBit        <= 3'd0;
+			transitionCell       <= 4'd0;
+			transitionPulseCount <= 3'd0;
+			transitionActive     <= 1'b0;
+			readTransition       <= 1'b0;
+		end else if (cep) begin
+			readTransition <= 1'b0;
+			if (transitionPulseCount != 0) begin
+				readTransition       <= 1'b1;
+				transitionPulseCount <= transitionPulseCount - 3'd1;
+			end
+
+			if (newByteReady) begin
+				transitionShift  <= diskDataIn;
+				transitionBit    <= 3'd0;
+				transitionCell   <= 4'd0;
+				transitionActive <= 1'b1;
+			end else if (transitionActive) begin
+				if (transitionCell == 4'd0) begin
+					if (transitionShift[7]) begin
+						readTransition       <= 1'b1;
+						transitionPulseCount <= 3'd3;
+					end
+					transitionShift <= {transitionShift[6:0], 1'b0};
+					if (transitionBit == 3'd7)
+						transitionActive <= 1'b0;
+					else
+						transitionBit <= transitionBit + 3'd1;
+				end
+				transitionCell <= transitionCell + 4'd1;
+			end
+		end
 	end
 
 	// create a signal on the falling edge of lstrb

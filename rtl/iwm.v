@@ -116,9 +116,11 @@ module iwm
 	reg diskEnableExtNext, diskEnableIntNext;
 	wire newByteReadyInt;
 	wire [7:0] readDataInt;
+	wire readTransitionInt;
 	wire senseInt = readDataInt[7]; // bit 7 doubles as the sense line here
 	wire newByteReadyExt;
 	wire [7:0] readDataExt;
+	wire readTransitionExt;
 	// a DCD image is mounted (rtl/dcd.v)
 	wire dcdPresent;
 
@@ -179,6 +181,7 @@ module iwm
 		// dataInLo directly: a registered copy would lag writeReqInt by one cycle
 		.writeData(dataInLo),
 		.readData(readDataInt),
+		.readTransition(readTransitionInt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyInt),
 		.insertDisk(insertDisk[0]),
@@ -225,6 +228,7 @@ module iwm
 		._enable(~(diskEnableExt & ~dcdOwnsPort)),
 		.writeData(dataInLo), // see floppyInt's writeData comment above
 		.readData(readDataExt),
+		.readTransition(readTransitionExt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyExt),
 		.insertDisk(insertDisk[1]),
@@ -297,9 +301,12 @@ module iwm
 
 	wire [7:0] readData = selectExternalDrive ? readDataExtSel : readDataInt;
 	wire newByteReady = selectExternalDrive ? newByteReadyExtSel : newByteReadyInt;
+	wire readTransition = selectExternalDrive ? readTransitionExt : readTransitionInt;
+	wire dcdByteRead = selectExternalDrive && dcdOwnsPort;
+	wire floppyReadActive = !q7 && (selectExternalDrive ? (diskEnableExt && !dcdOwnsPort) :
+	                                                      (diskEnableInt && driveSel));
 	
-	// iwmMode is written and read back but no bit of it affects behaviour;
-	// latch mode is always L=1
+	// IWM mode register, written while the controller is disabled.
 	reg [4:0] iwmMode;
 	/* IWM mode register: S C M H L
  	 S	Clock speed:
@@ -424,9 +431,34 @@ module iwm
 		end
 	end
 
-	// Manage incoming bytes from the disk drive
+	// The IWM reads a serial pulse stream. Each flux transition moves the
+	// receiver into the second half of its current bit-cell window; the bit
+	// shifted in is one when a transition arrived, otherwise zero.
 	wire iwmRead = (_cpuRW == 1'b1 && selectIWM == 1'b1 && _cpuLDS == 1'b0);
 	reg [3:0] readLatchClearTimer;
+	reg [7:0] readShiftRegister;
+	reg [5:0] readWindowTimer;
+	reg       readWindowEdge;
+	reg       readTransitionSeen;
+	reg [5:0] readWindowCycles;
+	reg [5:0] readHalfWindowCycles;
+
+	always @(*) begin
+		case (iwmMode[4:3])
+			2'b00: begin readWindowCycles = 6'd28; readHalfWindowCycles = 6'd14; end
+			2'b01: begin readWindowCycles = 6'd14; readHalfWindowCycles = 6'd7;  end
+			2'b10: begin readWindowCycles = 6'd36; readHalfWindowCycles = 6'd16; end
+			default: begin readWindowCycles = 6'd16; readHalfWindowCycles = 6'd8; end
+		endcase
+	end
+
+	wire readWindowComplete = readWindowEdge ?
+		(readWindowTimer >= readHalfWindowCycles - 6'd1) :
+		(readWindowTimer >= readWindowCycles - 6'd1);
+	wire readCellBit = readWindowEdge || readTransitionSeen || readTransition;
+	wire [7:0] readShiftNext = {readShiftRegister[6:0], readCellBit};
+	wire readLatchUpdate = cen && floppyReadActive && readWindowComplete &&
+		(readShiftNext[7] || (!iwmMode[1] && (readShiftNext[7:2] != 6'd0)));
 
 	// The latch-clear countdown scales with CPU speed: the .Sony driver polls
 	// bit 7 about 2.0 us apart at 8 MHz and 1.0 us at 16 MHz, and a latch that
@@ -438,6 +470,10 @@ module iwm
 		if (_reset == 1'b0) begin
 			readDataLatch <= 0;
 			readLatchClearTimer <= 0;
+			readShiftRegister <= 8'd0;
+			readWindowTimer <= 6'd0;
+			readWindowEdge <= 1'b0;
+			readTransitionSeen <= 1'b0;
 		end
 		else begin
 			// a countdown timer governs how long after a data latch read before the latch is cleared
@@ -455,12 +491,44 @@ module iwm
 				end
 			end
 
-			// when the drive indicates that a new byte is ready, latch it
-			// NOTE: the real IWM must self-synchronize with the incoming data to determine when to latch it
-			if (cen && newByteReady) begin
-				readDataLatch <= readData;
+			if (cen && floppyReadActive) begin
+				if (readTransition)
+					readTransitionSeen <= 1'b1;
+
+				if (!readWindowEdge && (readTransitionSeen || readTransition)) begin
+					// Anchor the second half-window to the actual transition. This
+					// lets timing drift follow the media instead of a byte strobe.
+					readWindowEdge <= 1'b1;
+					readWindowTimer <= 6'd0;
+					readTransitionSeen <= 1'b0;
+				end else if (readWindowComplete) begin
+					readWindowEdge <= 1'b0;
+					readWindowTimer <= 6'd0;
+					readTransitionSeen <= 1'b0;
+					readShiftRegister <= readShiftNext;
+					if (readShiftNext[7]) begin
+						readDataLatch <= readShiftNext;
+						readShiftRegister <= 8'd0;
+					end else if (!iwmMode[1] && (readShiftNext[7:2] != 6'd0)) begin
+						// Synchronous mode exposes partial sync bytes before the
+						// first complete byte, as the IWM read register does.
+						readDataLatch <= readShiftNext;
+					end
+				end else begin
+					readWindowTimer <= readWindowTimer + 6'd1;
+				end
+			end else begin
+				readWindowTimer <= 6'd0;
+				readWindowEdge <= 1'b0;
+				readTransitionSeen <= 1'b0;
 			end
-			else if (latchClearCe && readLatchClearTimer == 4'd1) begin
+
+			// The HD20 block device still presents byte-ready data; retain that
+			// adapter while floppy drives use the serial transition receiver.
+			if (cen && dcdByteRead && newByteReady)
+				readDataLatch <= readData;
+			else if (latchClearCe && readLatchClearTimer == 4'd1 &&
+			         !readLatchUpdate && !(cen && dcdByteRead && newByteReady)) begin
 				readDataLatch <= 0;
 			end
 		end
