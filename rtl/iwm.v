@@ -404,7 +404,7 @@ module iwm
 			2'b00: // data-in register (from disk drive) - MSB is 1 when data is valid
 				dataOutLo <= readDataLatch;
 			2'b01: // IWM status register - read only
-				dataOutLo <= { (selectExternalDriveNext ? senseExt : senseInt), 1'b0, diskEnableExt & diskEnableInt, iwmMode }; 
+				dataOutLo <= { (selectExternalDriveNext ? senseExt : senseInt), 1'b0, diskEnableExt | diskEnableInt, iwmMode }; 
 			2'b10: // handshake - read only
 				dataOutLo <= { _iwmBusy, _writeUnderrun, 6'b000000 };
 			2'b11: // IWM mode register when not enabled (write-only), or (write?) data register when enabled
@@ -447,7 +447,7 @@ module iwm
 		case (iwmMode[4:3])
 			2'b00: begin readWindowCycles = 6'd28; readHalfWindowCycles = 6'd14; end
 			2'b01: begin readWindowCycles = 6'd14; readHalfWindowCycles = 6'd7;  end
-			2'b10: begin readWindowCycles = 6'd36; readHalfWindowCycles = 6'd16; end
+			2'b10: begin readWindowCycles = 6'd36; readHalfWindowCycles = 6'd18; end
 			default: begin readWindowCycles = 6'd16; readHalfWindowCycles = 6'd8; end
 		endcase
 	end
