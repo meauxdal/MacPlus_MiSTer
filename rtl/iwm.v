@@ -431,17 +431,23 @@ module iwm
 		end
 	end
 
-	// The IWM reads a serial pulse stream. Each flux transition moves the
-	// receiver into the second half of its current bit-cell window; the bit
-	// shifted in is one when a transition arrived, otherwise zero.
+	// The IWM reads a serial pulse stream using a rolling transition window.
+	// EDGE0 accepts flux within a window and emits zero when the window expires;
+	// EDGE1 emits one after the half-window following an accepted transition.
 	wire iwmRead = (_cpuRW == 1'b1 && selectIWM == 1'b1 && _cpuLDS == 1'b0);
 	reg [3:0] readLatchClearTimer;
 	reg [7:0] readShiftRegister;
 	reg [5:0] readWindowTimer;
-	reg       readWindowEdge;
-	reg       readTransitionSeen;
+	reg [1:0] readWindowState;
+	reg       floppyReadActiveD;
+	reg       syncReadUpdatePending;
+	reg [3:0] syncReadUpdateTimer;
 	reg [5:0] readWindowCycles;
 	reg [5:0] readHalfWindowCycles;
+	reg [3:0] readRegisterUpdateDelay;
+	localparam [1:0] READ_WINDOW_IDLE = 2'd0;
+	localparam [1:0] READ_WINDOW_EDGE0 = 2'd1;
+	localparam [1:0] READ_WINDOW_EDGE1 = 2'd2;
 
 	always @(*) begin
 		case (iwmMode[4:3])
@@ -450,15 +456,16 @@ module iwm
 			2'b10: begin readWindowCycles = 6'd36; readHalfWindowCycles = 6'd16; end
 			default: begin readWindowCycles = 6'd16; readHalfWindowCycles = 6'd8; end
 		endcase
+		readRegisterUpdateDelay = iwmMode[3] ? 4'd4 : 4'd8;
 	end
 
-	wire readWindowComplete = readWindowEdge ?
-		(readWindowTimer >= readHalfWindowCycles - 6'd1) :
-		(readWindowTimer >= readWindowCycles - 6'd1);
-	wire readCellBit = readWindowEdge || readTransitionSeen || readTransition;
+	wire readShiftOne = readWindowState == READ_WINDOW_EDGE1 &&
+	                     readWindowTimer >= readHalfWindowCycles - 6'd1;
+	wire readShiftZero = readWindowState == READ_WINDOW_EDGE0 && !readTransition &&
+	                     readWindowTimer >= readWindowCycles - 6'd1;
+	wire readShiftStrobe = cen && floppyReadActive && (readShiftOne || readShiftZero);
+	wire readCellBit = readWindowState == READ_WINDOW_EDGE1;
 	wire [7:0] readShiftNext = {readShiftRegister[6:0], readCellBit};
-	wire readLatchUpdate = cen && floppyReadActive && readWindowComplete &&
-		(readShiftNext[7] || (!iwmMode[1] && (readShiftNext[7:2] != 6'd0)));
 
 	// The latch-clear countdown scales with CPU speed: the .Sony driver polls
 	// bit 7 about 2.0 us apart at 8 MHz and 1.0 us at 16 MHz, and a latch that
@@ -472,8 +479,10 @@ module iwm
 			readLatchClearTimer <= 0;
 			readShiftRegister <= 8'd0;
 			readWindowTimer <= 6'd0;
-			readWindowEdge <= 1'b0;
-			readTransitionSeen <= 1'b0;
+			readWindowState <= READ_WINDOW_IDLE;
+			floppyReadActiveD <= 1'b0;
+			syncReadUpdatePending <= 1'b0;
+			syncReadUpdateTimer <= 4'd0;
 		end
 		else begin
 			// a countdown timer governs how long after a data latch read before the latch is cleared
@@ -486,49 +495,100 @@ module iwm
 			// reload after a valid CPU read, on latchClearCe rather than cen so the
 			// countdown start is not snapped to the 2-cycle grid at 16 MHz
 			if (latchClearCe) begin
-				if (iwmRead && readDataLatch[7]) begin
-					readLatchClearTimer <= 4'hD; // clear latch 14 clocks after the conclusion of a valid read
+				if (iwmMode[1] && iwmRead && !q7Next && !q6Next && readDataLatch[7]) begin
+					readLatchClearTimer <= 4'hE; // clear latch 14 clocks after the conclusion of a valid read
 				end
 			end
 
-			if (cen && floppyReadActive) begin
-				if (readTransition)
-					readTransitionSeen <= 1'b1;
-
-				if (!readWindowEdge && (readTransitionSeen || readTransition)) begin
-					// Anchor the second half-window to the actual transition. This
-					// lets timing drift follow the media instead of a byte strobe.
-					readWindowEdge <= 1'b1;
+			if (cen) begin
+				floppyReadActiveD <= floppyReadActive;
+				if (!floppyReadActive) begin
 					readWindowTimer <= 6'd0;
-					readTransitionSeen <= 1'b0;
-				end else if (readWindowComplete) begin
-					readWindowEdge <= 1'b0;
+					readWindowState <= READ_WINDOW_IDLE;
+					syncReadUpdatePending <= 1'b0;
+					syncReadUpdateTimer <= 4'd0;
+				end else if (!floppyReadActiveD) begin
+					// Start in S_IDLE, then wait one full window before looking
+					// for transitions in the following window.
 					readWindowTimer <= 6'd0;
-					readTransitionSeen <= 1'b0;
-					readShiftRegister <= readShiftNext;
-					if (readShiftNext[7]) begin
-						readDataLatch <= readShiftNext;
-						readShiftRegister <= 8'd0;
-					end else if (!iwmMode[1] && (readShiftNext[7:2] != 6'd0)) begin
-						// Synchronous mode exposes partial sync bytes before the
-						// first complete byte, as the IWM read register does.
-						readDataLatch <= readShiftNext;
-					end
+					readWindowState <= READ_WINDOW_IDLE;
+					readShiftRegister <= 8'd0;
+					readDataLatch <= 8'd0;
+					syncReadUpdatePending <= 1'b0;
+					syncReadUpdateTimer <= 4'd0;
 				end else begin
-					readWindowTimer <= readWindowTimer + 6'd1;
+					case (readWindowState)
+						READ_WINDOW_IDLE: begin
+							if (readWindowTimer >= readWindowCycles - 6'd1) begin
+								readWindowTimer <= 6'd0;
+								readWindowState <= READ_WINDOW_EDGE0;
+							end else
+								readWindowTimer <= readWindowTimer + 6'd1;
+						end
+						READ_WINDOW_EDGE0: begin
+							if (readTransition) begin
+								readWindowTimer <= 6'd0;
+								readWindowState <= READ_WINDOW_EDGE1;
+							end else if (readShiftZero) begin
+								readWindowTimer <= 6'd0;
+							end else
+								readWindowTimer <= readWindowTimer + 6'd1;
+						end
+						READ_WINDOW_EDGE1: begin
+							if (readShiftOne) begin
+								readWindowTimer <= 6'd0;
+								readWindowState <= READ_WINDOW_EDGE0;
+							end else
+								readWindowTimer <= readWindowTimer + 6'd1;
+						end
+						default: begin
+							readWindowTimer <= 6'd0;
+							readWindowState <= READ_WINDOW_IDLE;
+						end
+					endcase
+
+					if (readShiftStrobe) begin
+						readShiftRegister <= readShiftNext;
+						if (readShiftNext[7]) begin
+							readDataLatch <= readShiftNext;
+							readShiftRegister <= 8'd0;
+							syncReadUpdatePending <= 1'b0;
+						end else if (!iwmMode[1] && readShiftNext >= 8'd4) begin
+							// Synchronous mode exposes partial data once the shifter
+							// reaches the IWM's 0x04 threshold.
+							readDataLatch <= readShiftNext;
+							syncReadUpdatePending <= 1'b0;
+						end else if (!iwmMode[1] && readShiftNext >= 8'd2) begin
+							syncReadUpdatePending <= 1'b1;
+							syncReadUpdateTimer <= readRegisterUpdateDelay;
+						end
+					end
+
+					if (syncReadUpdatePending &&
+					    !(readShiftStrobe && readShiftNext >= 8'd2)) begin
+						if (syncReadUpdateTimer <= 4'd1) begin
+							readDataLatch <= readShiftStrobe ? readShiftNext : readShiftRegister;
+							syncReadUpdatePending <= 1'b0;
+							syncReadUpdateTimer <= 4'd0;
+						end else
+							syncReadUpdateTimer <= syncReadUpdateTimer - 4'd1;
+					end
 				end
-			end else begin
-				readWindowTimer <= 6'd0;
-				readWindowEdge <= 1'b0;
-				readTransitionSeen <= 1'b0;
+			end
+
+			// Reading status with Q6 high clears the read shifter.
+			if (iwmRead && !q7Next && q6Next) begin
+				readShiftRegister <= 8'd0;
+				syncReadUpdatePending <= 1'b0;
+				syncReadUpdateTimer <= 4'd0;
 			end
 
 			// The HD20 block device still presents byte-ready data; retain that
 			// adapter while floppy drives use the serial transition receiver.
 			if (cen && dcdByteRead && newByteReady)
 				readDataLatch <= readData;
-			else if (latchClearCe && readLatchClearTimer == 4'd1 &&
-			         !readLatchUpdate && !(cen && dcdByteRead && newByteReady)) begin
+			else if (iwmMode[1] && latchClearCe && readLatchClearTimer == 4'd1 &&
+			         !(cen && dcdByteRead && newByteReady)) begin
 				readDataLatch <= 0;
 			end
 		end
