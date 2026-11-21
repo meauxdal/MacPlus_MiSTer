@@ -106,10 +106,9 @@ module iwm
 	reg ca0Next, ca1Next, ca2Next, lstrbNext, selectExternalDriveNext, q6Next, q7Next;
 	wire advanceDriveHead; // prevents overrun when debugging, does not exit on a real Mac!
 	reg [7:0] readDataLatch;
-	wire _iwmBusy, _writeUnderrun;
-	// write buffer empty, muxed from the selected drive
-	assign _iwmBusy       = ~(selectExternalDrive ? writeBusyExt : writeBusyInt);
-	assign _writeUnderrun = ~(selectExternalDrive ? writeUnderrunExt : writeUnderrunInt);
+	// write handshake register bits 7 (buffer empty) and 6 (no underrun), owned
+	// by the serial write machine below
+	reg writeBufferEmpty, writeNoUnderrun;
 
 	// floppy disk drives 
 	reg diskEnableExt, diskEnableInt;
@@ -143,13 +142,11 @@ module iwm
 	// the DCD still holds the external port
 	wire dcdOwnsPort = dcdPresent & ~chainSel;
 
-	// write path: the target drive follows selectExternalDriveNext, as q7Next/q6Next
+	// a CPU write to the data register: Q7=Q6=1 with a drive enabled
 	wire dataRegWrite = (_cpuRW == 1'b0) && selectIWM && (_cpuLDS == 1'b0) &&
 	                    ({q7Next, q6Next} == 2'b11) && (diskEnableExt | diskEnableInt);
-	wire writeReqInt = cen && dataRegWrite && !selectExternalDriveNext;
-	wire writeReqExt = cen && dataRegWrite &&  selectExternalDriveNext;
 
-	// dataRegWrite is a level held for three cen samples; the DCD needs an edge
+	// dataRegWrite is a level held for three cen samples; take its first one
 	reg dataRegWriteSeen;
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0)
@@ -157,11 +154,18 @@ module iwm
 		else if (cen)
 			dataRegWriteSeen <= dataRegWrite;
 	end
-	wire writeReqDcd = cen && dataRegWrite && !dataRegWriteSeen &&
-	                   selectExternalDriveNext;
+	wire dataRegWriteStrobe = cen && dataRegWrite && !dataRegWriteSeen;
 
-	wire writeBusyInt, writeUnderrunInt;
-	wire writeBusyExt, writeUnderrunExt;
+	// The DCD still takes bytes as the CPU writes them, not as the IWM shifts
+	// them out; see the write machine below.
+	wire writeReqDcd = dataRegWriteStrobe && selectExternalDriveNext;
+
+	// Floppies take each byte as the write machine moves it from the data
+	// register into the shifter (see writeLoadStrobe below).
+	wire       writeLoadStrobe;
+	wire [7:0] writeLoadByte;
+	wire writeReqInt = writeLoadStrobe && !selectExternalDrive;
+	wire writeReqExt = writeLoadStrobe &&  selectExternalDrive;
 
 	floppy floppyInt
 	(
@@ -178,8 +182,7 @@ module iwm
 		// a real IWM enables one drive at a time; keeps the chain walk's LSTRB
 		// (EJECT in state 7) from the internal drive
 		._enable(~(diskEnableInt & driveSel & ~selectExternalDrive)),
-		// dataInLo directly: a registered copy would lag writeReqInt by one cycle
-		.writeData(dataInLo),
+		.writeData(writeLoadByte),
 		.readData(readDataInt),
 		.readTransition(readTransitionInt),
 		.advanceDriveHead(advanceDriveHead),
@@ -200,8 +203,6 @@ module iwm
 
 		.writeReq(writeReqInt),
 		.writeProtect(writeProtect[0]),
-		.writeBusy(writeBusyInt),
-		.writeUnderrun(writeUnderrunInt),
 		.writeMode(q7),
 		.dskWriteAddr(dskWriteAddrInt),
 		.dskWriteData(dskWriteDataInt),
@@ -226,7 +227,7 @@ module iwm
 		.lstrb(lstrb),
 		// disabled while the DCD owns the port
 		._enable(~(diskEnableExt & ~dcdOwnsPort)),
-		.writeData(dataInLo), // see floppyInt's writeData comment above
+		.writeData(writeLoadByte),
 		.readData(readDataExt),
 		.readTransition(readTransitionExt),
 		.advanceDriveHead(advanceDriveHead),
@@ -247,8 +248,6 @@ module iwm
 
 		.writeReq(writeReqExt),
 		.writeProtect(writeProtect[1]),
-		.writeBusy(writeBusyExt),
-		.writeUnderrun(writeUnderrunExt),
 		.writeMode(q7),
 		.dskWriteAddr(dskWriteAddrExt),
 		.dskWriteData(dskWriteDataExt),
@@ -400,13 +399,16 @@ module iwm
 		dataOutLo = 8'hEF;
 		
 		// reading any IWM address returns state as selected by Q7 and Q6
-		case ({q7Next,q6Next}) 
+		// the access's own switch takes effect before the read, as in MAME's
+		// control() then read()
+		case ({q7Next,q6Next})
 			2'b00: // data-in register (from disk drive) - MSB is 1 when data is valid
-				dataOutLo <= readDataLatch;
+				// all ones while no drive is enabled
+				dataOutLo <= (diskEnableExtNext | diskEnableIntNext) ? readDataLatch : 8'hFF;
 			2'b01: // IWM status register - read only
-				dataOutLo <= { (selectExternalDriveNext ? senseExt : senseInt), 1'b0, diskEnableExt | diskEnableInt, iwmMode }; 
-			2'b10: // handshake - read only
-				dataOutLo <= { _iwmBusy, _writeUnderrun, 6'b000000 };
+				dataOutLo <= { (selectExternalDriveNext ? senseExt : senseInt), 1'b0, diskEnableExtNext | diskEnableIntNext, iwmMode };
+			2'b10: // handshake - read only; bits 5-0 read as ones
+				dataOutLo <= { writeBufferEmpty, writeNoUnderrun, 6'b111111 };
 			2'b11: // IWM mode register when not enabled (write-only), or (write?) data register when enabled
 				dataOutLo <= 0;
 		endcase
@@ -461,7 +463,15 @@ module iwm
 
 	wire readShiftOne = readWindowState == READ_WINDOW_EDGE1 &&
 	                     readWindowTimer >= readHalfWindowCycles - 6'd1;
-	wire readShiftZero = readWindowState == READ_WINDOW_EDGE0 && !readTransition &&
+	// floppy.v's transition pulse is 0.5 us wide; the window takes its leading
+	// edge, so one pulse is one transition however the windows fall
+	reg  readTransitionD;
+	always @(posedge clk or negedge _reset)
+		if (_reset == 1'b0) readTransitionD <= 1'b0;
+		else if (cen)       readTransitionD <= readTransition;
+	wire readTransitionEdge = readTransition && !readTransitionD;
+
+	wire readShiftZero = readWindowState == READ_WINDOW_EDGE0 && !readTransitionEdge &&
 	                     readWindowTimer >= readWindowCycles - 6'd1;
 	wire readShiftStrobe = cen && floppyReadActive && (readShiftOne || readShiftZero);
 	wire readCellBit = readWindowState == READ_WINDOW_EDGE1;
@@ -526,7 +536,7 @@ module iwm
 								readWindowTimer <= readWindowTimer + 6'd1;
 						end
 						READ_WINDOW_EDGE0: begin
-							if (readTransition) begin
+							if (readTransitionEdge) begin
 								readWindowTimer <= 6'd0;
 								readWindowState <= READ_WINDOW_EDGE1;
 							end else if (readShiftZero) begin
@@ -553,6 +563,9 @@ module iwm
 							readDataLatch <= readShiftNext;
 							readShiftRegister <= 8'd0;
 							syncReadUpdatePending <= 1'b0;
+							// a fresh byte cancels a pending clear of the last one
+							// (MAME zeroes m_async_update here)
+							readLatchClearTimer <= 4'd0;
 						end else if (!iwmMode[1] && readShiftNext >= 8'd4) begin
 							// Synchronous mode exposes partial data once the shifter
 							// reaches the IWM's 0x04 threshold.
@@ -588,11 +601,154 @@ module iwm
 			if (cen && dcdByteRead && newByteReady)
 				readDataLatch <= readData;
 			else if (iwmMode[1] && latchClearCe && readLatchClearTimer == 4'd1 &&
+			         !(readShiftStrobe && readShiftNext[7]) &&
 			         !(cen && dcdByteRead && newByteReady)) begin
 				readDataLatch <= 0;
 			end
 		end
 	end
+
+	// Serial write machine, after MAME's iwm_device MODE_WRITE states. In
+	// asynchronous mode the CPU fills a one-byte data register; 7 clocks before
+	// the first bit cell of each byte the IWM moves it into the shifter and
+	// raises handshake bit 7 (buffer empty) so the CPU can supply the next byte
+	// while this one shifts out. Finding the register still empty at that point
+	// is an underrun: handshake bit 6 drops and the write stops until write
+	// mode is left and entered again. Synchronous mode has no buffer: CPU
+	// writes go straight to the shifter, which runs on without byte framing.
+	//
+	// Bit cells are two half-windows long (16 clocks in the Mac's mode $1F, 2
+	// us at 8 MHz). A one is a flux transition at mid-cell (writeFluxStrobe).
+	// The sector-image floppies take whole bytes at the load instead.
+	localparam [2:0] WRITE_IDLE     = 3'd0;
+	localparam [2:0] WRITE_LOAD     = 3'd1;
+	localparam [2:0] WRITE_MIDDLE   = 3'd2;
+	localparam [2:0] WRITE_END      = 3'd3;
+	localparam [2:0] WRITE_UNDERRUN = 3'd4;
+
+	wire iwmActive = diskEnableExt | diskEnableInt;
+	wire writeMode = iwmActive && q7;
+
+	reg [2:0] writeState;
+	reg [4:0] writeTimer;    // clocks until the next state action
+	reg [3:0] writeBitCount;
+	reg [7:0] writeDataReg;
+	reg [7:0] writeShift;
+	reg       writeModeD;
+	reg       writeLoadStrobeReg;
+	reg [7:0] writeLoadByteReg;
+	reg       writeFluxStrobe; // for a flux-level drive; unused by DSK images
+
+	// one clk wide at the cen after the load: floppy.v samples it every clk
+	assign writeLoadStrobe = cen && writeLoadStrobeReg;
+	assign writeLoadByte   = writeLoadByteReg;
+
+	// Half-window less one, for the down-counter. The 7 MHz fast mode's 7-clock
+	// half-window leaves no time between the load and the first mid-cell; that
+	// mode is only meaningful with a 7 MHz fclk and is clamped to one clock.
+	wire [4:0] writeHalfM1  = readHalfWindowCycles[4:0] - 5'd1;
+	wire [4:0] writeAfterLoadM1 = (readHalfWindowCycles[4:0] > 5'd8) ?
+	                              readHalfWindowCycles[4:0] - 5'd8 : 5'd0;
+
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0) begin
+			writeState         <= WRITE_IDLE;
+			writeTimer         <= 5'd0;
+			writeBitCount      <= 4'd0;
+			writeDataReg       <= 8'd0;
+			writeShift         <= 8'd0;
+			writeModeD         <= 1'b0;
+			writeLoadStrobeReg <= 1'b0;
+			writeLoadByteReg   <= 8'd0;
+			writeFluxStrobe    <= 1'b0;
+			writeBufferEmpty   <= 1'b1; // MAME resets the handshake to $BF
+			writeNoUnderrun    <= 1'b0;
+		end else if (cen) begin
+			writeModeD         <= writeMode;
+			writeLoadStrobeReg <= 1'b0;
+			writeFluxStrobe    <= 1'b0;
+
+			if (!iwmActive)
+				writeNoUnderrun <= 1'b0; // motor off clears bit 6; Q7 low alone does not
+
+			if (!writeMode) begin
+				writeState <= WRITE_IDLE;
+				writeTimer <= 5'd0;
+			end else if (!writeModeD) begin
+				// entering write mode, which also takes MAME's S_IDLE step at once;
+				// the buffer-empty flag is left as it was
+				writeNoUnderrun <= 1'b1;
+				if (iwmMode[1]) begin
+					writeState    <= WRITE_LOAD;
+					writeBitCount <= 4'd8;
+					writeTimer    <= 5'd6; // load 7 clocks after entry
+				end else begin
+					writeShift <= writeDataReg;
+					writeState <= WRITE_MIDDLE;
+					writeTimer <= writeHalfM1;
+				end
+			end else if (writeTimer != 5'd0) begin
+				writeTimer <= writeTimer - 5'd1;
+			end else begin
+				case (writeState)
+					WRITE_IDLE: begin
+						if (iwmMode[1]) begin
+							writeState    <= WRITE_LOAD;
+							writeBitCount <= 4'd8;
+							writeTimer    <= 5'd6;
+						end else begin
+							writeShift <= writeDataReg;
+							writeState <= WRITE_MIDDLE;
+							writeTimer <= writeHalfM1;
+						end
+					end
+					WRITE_LOAD: begin
+						if (writeBufferEmpty) begin
+							writeNoUnderrun <= 1'b0;
+							writeState      <= WRITE_UNDERRUN;
+						end else begin
+							writeShift         <= writeDataReg;
+							writeLoadByteReg   <= writeDataReg;
+							writeBufferEmpty   <= 1'b1;
+							writeLoadStrobeReg <= 1'b1;
+							writeState         <= WRITE_MIDDLE;
+							writeTimer         <= writeAfterLoadM1;
+						end
+					end
+					WRITE_MIDDLE: begin
+						writeFluxStrobe <= writeShift[7];
+						writeShift      <= {writeShift[6:0], 1'b0};
+						writeState      <= WRITE_END;
+						writeTimer      <= writeHalfM1;
+					end
+					WRITE_END: begin
+						if (iwmMode[1] && writeBitCount == 4'd1) begin
+							writeState    <= WRITE_LOAD;
+							writeBitCount <= 4'd8;
+							writeTimer    <= 5'd6;
+						end else begin
+							writeBitCount <= writeBitCount - 4'd1;
+							writeState    <= WRITE_MIDDLE;
+							writeTimer    <= writeHalfM1;
+						end
+					end
+					default: ; // WRITE_UNDERRUN holds until write mode is left
+				endcase
+			end
+
+			// The data register write lands after the state step, as MAME's
+			// data_w follows control()'s sync(). MAME clears bit 7 only in latch
+			// mode, which would underrun every unlatched async write; it is
+			// cleared on every write here.
+			if (dataRegWriteStrobe) begin
+				writeDataReg     <= dataInLo;
+				writeBufferEmpty <= 1'b0;
+				if (!iwmMode[1] && writeMode)
+					writeShift <= dataInLo;
+			end
+		end
+	end
+
 	// inert: floppy.v hardwires readyToAdvanceHead to 1
 	assign advanceDriveHead = readLatchClearTimer == 1'b1; // prevents overrun when debugging, does not exist on a real Mac!
 endmodule

@@ -96,10 +96,8 @@ module floppy
 	input [7:0] dskReadData,
 
 	// floppy write path
-	input writeReq,        // pulse: CPU registered a new byte in the IWM write-data register
+	input writeReq,        // one-clk pulse: the IWM moved writeData into its shifter
 	input writeProtect,    // 1 = writes refused for this drive (OSD toggle ANDed with img_readonly)
-	output writeBusy,      // 1 = write buffer full, mac must wait (iwm.v inverts for _iwmBusy)
-	output writeUnderrun,  // 1 = an in-flight write byte was abandoned (iwm.v inverts for _writeUnderrun)
 	input  writeMode,      // IWM Q7: in write mode. Bounds a write for the format relay
 
 	output [21:0] dskWriteAddr,
@@ -202,18 +200,12 @@ module floppy
 
 	wire doubleSidedDisk = drive800k && img800k && (fmtSeen ? fmtDs : mediaSides);
 
-	// Write path. CPU bytes are paced at the read side's 16us byte time, then
-	// handed to floppy_track_decoder; a checksum-valid sector is drained to
-	// SDRAM by floppy_write_committer over the shared extra-slot-3 port.
-	// writeUnderrun is raised only for a byte abandoned by deselect.
-	reg        writeBusyReg;
-	reg [6:0]  writeByteTimer;
+	// Write path. iwm.v paces the bytes and owns the write handshake; each byte
+	// arrives as it enters the IWM's shifter and goes straight to
+	// floppy_track_decoder. A checksum-valid sector is drained to SDRAM by
+	// floppy_write_committer over the shared extra-slot-3 port.
 	reg [7:0]  pendingWriteByte;
-	reg        writeUnderrunReg;
 	reg        decReady;
-
-	assign writeBusy     = writeBusyReg;
-	assign writeUnderrun = writeUnderrunReg;
 
 	// Any disk change (OS eject or a fresh mount) resets the write path, so a
 	// half-decoded field cannot complete with the next image's bytes.
@@ -235,42 +227,19 @@ module floppy
 
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
-			writeBusyReg     <= 1'b0;
-			writeByteTimer   <= 7'd0;
 			pendingWriteByte <= 8'd0;
-			writeUnderrunReg <= 1'b0;
 			decReady         <= 1'b0;
 		end else if (writePathReset) begin
-			// abandon any in-flight write byte
-			writeBusyReg     <= 1'b0;
-			writeByteTimer   <= 7'd0;
 			decReady         <= 1'b0;
 		end else begin
-			decReady <= 1'b0; // default; pulsed for exactly one cep below
+			decReady <= 1'b0; // default; pulsed for one clk below
 
-			// byte pacing runs on the same clk8 cadence as diskDataByteTimer
-			if (cep && writeBusyReg) begin
-				if (_enable == 1'b1) begin
-					// drive deselected mid-byte: it never reached the media
-					writeBusyReg     <= 1'b0;
-					writeUnderrunReg <= 1'b1;
-				end else if (writeByteTimer == 7'd127) begin
-					writeBusyReg <= 1'b0;
-					decReady     <= 1'b1; // hand this byte to the decoder now
-				end else begin
-					writeByteTimer <= writeByteTimer + 1'b1;
-				end
-			end
-
-			// byte accepted when the IWM registers a write byte for this drive (cen and
-			// cep never coincide). insertDisk as well as CSTIN: CSTIN is only set by an
-			// OS eject and is not cleared by a remount
-			if (writeReq && _enable == 1'b0 && !writeProtect && !writeBusyReg &&
+			// insertDisk as well as CSTIN: CSTIN is only set by an OS eject and is
+			// not cleared by a remount
+			if (writeReq && _enable == 1'b0 && !writeProtect &&
 			    !driveRegs[`DRIVE_REG_CSTIN] && insertDisk) begin
 				pendingWriteByte <= writeData;
-				writeBusyReg     <= 1'b1;
-				writeByteTimer   <= 7'd0;
-				writeUnderrunReg <= 1'b0;
+				decReady         <= 1'b1;
 			end
 		end
 	end
@@ -278,7 +247,7 @@ module floppy
 	// the write as a whole, for the encoder's format relay; wrEnd is delayed
 	// two clocks so the encoder sees a mark before the end
 	reg  wrBusyPrev, wrEndD1;
-	wire wrBusy = (writeMode && _enable == 1'b0) || writeBusyReg;
+	wire wrBusy = writeMode && _enable == 1'b0;
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
 			wrBusyPrev <= 1'b0;
