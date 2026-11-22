@@ -206,9 +206,31 @@ end
 	      (count == 0)?8'hde:
 	      (count == 1)?8'haa:
 	      8'hff;
-   	      
+
+   // Self-sync. The IWM frames bytes on the bit stream (floppy.v serializes
+   // these bytes), and a run of 8-bit FFs cannot pull a misframed reader back
+   // into step: after a write, or any read restart, the next mark is missed.
+   // The last 15 bytes before each mark are the 10-bit sync groups a Mac
+   // writes, FF 3F CF F3 FC (four 1111111100 groups in 40 bits), so the mark
+   // follows the end of a group. sync_r counts bytes left to the mark.
+   wire [13:0] sync_r =
+	      (state == STATE_SYN0)?(14'd55 - { 4'd0, count }):
+	      (state == STATE_SYN1)?(14'd4  - { 4'd0, count }):
+	      (gap_cnt - 14'd1);                       // STATE_GAP
+
+   wire [7:0] odata_sync =
+	      (sync_r >= 14'd15)?8'hff:
+	      ((sync_r == 14'd0) || (sync_r == 14'd5) || (sync_r == 14'd10))?8'hfc:
+	      ((sync_r == 14'd1) || (sync_r == 14'd6) || (sync_r == 14'd11))?8'hf3:
+	      ((sync_r == 14'd2) || (sync_r == 14'd7) || (sync_r == 14'd12))?8'hcf:
+	      ((sync_r == 14'd3) || (sync_r == 14'd8) || (sync_r == 14'd13))?8'h3f:
+	      8'hff;
+
    // demultiplex output data
-   assign odata = (state == STATE_ADDR)?odata_addr:
+   assign odata = (state == STATE_SYN0)?odata_sync:
+		  (state == STATE_SYN1)?odata_sync:
+		  (state == STATE_GAP)?odata_sync:
+		  (state == STATE_ADDR)?odata_addr:
 		  (state == STATE_DHDR)?odata_dhdr:
 		  (state == STATE_DZRO)?sony_to_disk_byte:
 		  (state == STATE_DPRE)?sony_to_disk_byte:
