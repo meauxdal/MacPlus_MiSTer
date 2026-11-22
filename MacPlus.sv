@@ -61,8 +61,8 @@ video_freak video_freak
 localparam CONF_STR = {
 	"MACPLUS;UART115200;",
 	"-;",
-	"S2,DSK,Mount Pri Floppy;",
-	"S3,DSK,Mount Sec Floppy;",
+	"S2,DSKMO*,Mount Pri Floppy;",
+	"S3,DSKMO*,Mount Sec Floppy;",
 	"-;",
 	"D0SC0,IMGVHD,Mount SCSI-6;",
 	"D0SC1,IMGVHD,Mount SCSI-5;",
@@ -789,6 +789,8 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.drive800k(drive800k),
 	// medium sidedness from each floppy_loader
 	.mediaSides({ldr_ext_media_ds, ldr_int_media_ds}),
+	// MOOF bitstream images (floppy_moof.v)
+	.moof({ldr_ext_is_moof, ldr_int_is_moof}),
 	.diskEject(diskEject),
 	.dskReadAddrInt(dskReadAddrInt),
 	.dskReadAckInt(dskReadAckInt),
@@ -870,6 +872,7 @@ wire        ldr_int_busy, ldr_ext_busy;
 wire [63:0] ldr_int_size, ldr_ext_size;
 wire        ldr_int_readonly, ldr_ext_readonly;
 wire        ldr_int_media_ds, ldr_ext_media_ds;
+wire        ldr_int_is_moof,  ldr_ext_is_moof;
 
 floppy_loader ldr_int
 (
@@ -897,6 +900,7 @@ floppy_loader ldr_int
 	.loaded_size(ldr_int_size),
 	.readonly_latched(ldr_int_readonly),
 	.media_ds(ldr_int_media_ds),
+	.is_moof(ldr_int_is_moof),
 	.busy(ldr_int_busy)
 );
 
@@ -926,6 +930,7 @@ floppy_loader ldr_ext
 	.loaded_size(ldr_ext_size),
 	.readonly_latched(ldr_ext_readonly),
 	.media_ds(ldr_ext_media_ds),
+	.is_moof(ldr_ext_is_moof),
 	.busy(ldr_ext_busy)
 );
 
@@ -1018,9 +1023,10 @@ wire  [7:0] dio_index;
 wire [20:0] dio_rom_addr  = {1'b0, dio_index[7:6], dio_addr[17:0]};
 wire [20:0] rom_read_addr = {1'b0, romSlot,        memoryAddr[18:1]};
 
-// good floppy image sizes are 819200 bytes and 409600 bytes
-reg dsk_int_ds, dsk_ext_ds;  // 819,200-byte image inserted
-reg dsk_int_ss, dsk_ext_ss;  // 409,600-byte image inserted
+// good floppy image sizes are 819200 bytes and 409600 bytes; a MOOF image
+// of either kind counts by its INFO disk type (the loader's media_ds)
+reg dsk_int_ds, dsk_ext_ds;  // 819,200-byte or 800K MOOF image inserted
+reg dsk_int_ss, dsk_ext_ss;  // 409,600-byte or 400K MOOF image inserted
 
 // any known type of disk image inserted?
 wire dsk_int_ins = dsk_int_ds || dsk_int_ss;
@@ -1034,8 +1040,8 @@ always @(posedge clk_sys) begin
 		dsk_int_ss <= 1'b0;
 	end
 	else if (ldr_int_done) begin
-		dsk_int_ds <= (ldr_int_size == 64'd819200);
-		dsk_int_ss <= (ldr_int_size == 64'd409600);
+		dsk_int_ds <= ldr_int_is_moof ?  ldr_int_media_ds : (ldr_int_size == 64'd819200);
+		dsk_int_ss <= ldr_int_is_moof ? !ldr_int_media_ds : (ldr_int_size == 64'd409600);
 	end
 
 	if(diskEject[0]) begin
@@ -1050,8 +1056,8 @@ always @(posedge clk_sys) begin
 		dsk_ext_ss <= 1'b0;
 	end
 	else if (ldr_ext_done) begin
-		dsk_ext_ds <= (ldr_ext_size == 64'd819200);
-		dsk_ext_ss <= (ldr_ext_size == 64'd409600);
+		dsk_ext_ds <= ldr_ext_is_moof ?  ldr_ext_media_ds : (ldr_ext_size == 64'd819200);
+		dsk_ext_ss <= ldr_ext_is_moof ? !ldr_ext_media_ds : (ldr_ext_size == 64'd409600);
 	end
 
 	if(diskEject[1]) begin

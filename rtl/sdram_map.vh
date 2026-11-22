@@ -15,7 +15,8 @@
 `define SDRAM_ROM_BASE     25'h0400000
 
 // Byte offsets of each floppy image within the disk region; word = base+off/2.
-`define DSK_INT_BYTE_OFF   22'h100000
+// 2MB per drive: a MOOF image of an 800K disk is about 1.3MB.
+`define DSK_INT_BYTE_OFF   22'h000000
 `define DSK_EXT_BYTE_OFF   22'h200000
 
 `endif

@@ -32,6 +32,10 @@ module floppy_loader
 
 	// medium sidedness from the volume header, latched with `done`
 	output reg          media_ds,
+
+	// the image is a MOOF bitstream (floppy_moof.v plays it), latched with
+	// `done`; read-only for now, so it also sets readonly_latched
+	output reg          is_moof,
 	output              busy
 );
 
@@ -52,8 +56,8 @@ reg [15:0] buf_rd;
 always @(posedge clk_sys) buf_rd <= buf_mem[word_idx];
 
 reg  [7:0] word_idx;   // 0..255 within the current sector
-reg [10:0] sector;     // sector index within the image (up to 1600 for 800K)
-reg [10:0] nsect;      // total sectors, latched at mount
+reg [12:0] sector;     // sector index within the image (up to 4096)
+reg [12:0] nsect;      // total sectors, latched at mount
 
 // latch every mount request; one arriving during a drain must not be dropped
 reg mount_pending;
@@ -72,7 +76,7 @@ localparam [23:0] SIDEDNESS_THRESHOLD = 24'd1200;
 
 wire [15:0] mdb_word = {sd_buff_dout[7:0], sd_buff_dout[15:8]}; // as staged above
 wire        mdb_wr   = (state == SD_WAIT_DONE) && sd_buff_wr && sd_ack &&
-                       (sector == 11'd2);
+                       (sector == 13'd2);
 wire        sniff_rst = reset || (state == IDLE && mount_pending); // this mount's first cycle
 
 reg [15:0] mdb_sig;     // word 0:      drSigWord
@@ -128,11 +132,41 @@ always @(posedge clk_sys) begin
 	end
 end
 
+// MOOF sniff: the 8-byte signature "MOOF" FF 0A 0D 0A, then INFO at byte 20
+// (+1 disk type: 1 = 400K GCR, 2 = 800K GCR; +2 write protected). Words
+// arrive little-endian: the low byte is the even file offset.
+wire       sig_wr = (state == SD_WAIT_DONE) && sd_buff_wr && sd_ack &&
+                    (sector == 13'd0);
+reg  [3:0] sig_ok;     // one bit per signature word
+reg  [7:0] moof_type;
+
+always @(posedge clk_sys) begin
+	if (sniff_rst) sig_ok <= 4'd0;
+	else if (sig_wr) begin
+		case (sd_buff_addr)
+		8'd0:  sig_ok[0] <= (sd_buff_dout == 16'h4F4D); // "MO"
+		8'd1:  sig_ok[1] <= (sd_buff_dout == 16'h464F); // "OF"
+		8'd2:  sig_ok[2] <= (sd_buff_dout == 16'h0AFF);
+		8'd3:  sig_ok[3] <= (sd_buff_dout == 16'h0A0D);
+		8'd10: moof_type <= sd_buff_dout[15:8];         // byte 21
+		default: ;
+		endcase
+	end
+end
+
+wire moof_seen = (sig_ok == 4'hF);
+
 // published with `done`; double-sided until the medium says otherwise
 always @(posedge clk_sys) begin
-	if (reset) media_ds <= 1'b1;
-	else if (state == DONE_PULSE)
-		media_ds <= !mdb_ok || (vol_blocks > SIDEDNESS_THRESHOLD);
+	if (reset) begin
+		media_ds <= 1'b1;
+		is_moof  <= 1'b0;
+	end
+	else if (state == DONE_PULSE) begin
+		is_moof  <= moof_seen;
+		media_ds <= moof_seen ? (moof_type == 8'd2) :
+		            (!mdb_ok || (vol_blocks > SIDEDNESS_THRESHOLD));
+	end
 end
 
 always @(posedge clk_sys) begin
@@ -147,13 +181,16 @@ always @(posedge clk_sys) begin
 		IDLE: if (mount_pending) begin
 			loaded_size      <= img_size;
 			readonly_latched <= img_readonly;
-			nsect            <= img_size[19:9]; // img_size / 512
-			sector           <= 11'd0;
+			// whole 512-byte blocks, rounding up (a MOOF ends with a
+			// META chunk of any length); the slot holds 2MB
+			nsect            <= (img_size >= 64'h200000) ? 13'd4096 :
+			                    img_size[21:9] + (img_size[8:0] != 9'd0);
+			sector           <= 13'd0;
 			state            <= SD_ASSERT;
 		end
 
 		SD_ASSERT: begin
-			sd_lba <= {21'd0, sector};
+			sd_lba <= {19'd0, sector};
 			sd_rd  <= 1'b1;
 			state  <= SD_WAIT_ACK;
 		end
@@ -183,9 +220,9 @@ always @(posedge clk_sys) begin
 		DRAIN_WAIT: if (wr_ack) begin
 			wr_req <= 1'b0;
 			if (word_idx == 8'd255) begin
-				if (sector == nsect - 11'd1) state <= DONE_PULSE;
+				if (sector == nsect - 13'd1) state <= DONE_PULSE;
 				else begin
-					sector <= sector + 11'd1;
+					sector <= sector + 13'd1;
 					state  <= SD_ASSERT;
 				end
 			end else begin
@@ -196,6 +233,9 @@ always @(posedge clk_sys) begin
 
 		DONE_PULSE: begin
 			done  <= 1'b1;
+			// MOOF writes are not supported yet: refuse them at the
+			// drive and never write the image back to SD
+			if (moof_seen) readonly_latched <= 1'b1;
 			state <= IDLE;
 		end
 

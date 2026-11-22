@@ -73,7 +73,7 @@ module floppy
 	input _enable,
 	input [7:0] writeData,
 	output [7:0] readData,
-	output reg readTransition, // 0.5 us pulse for each serialized one bit
+	output readTransition,     // 0.5 us pulse for each serialized one bit
 
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
@@ -84,6 +84,8 @@ module floppy
 	input drive800k,
 	// the medium's own sidedness, from floppy_loader.v's mount-time sniff
 	input mediaSides,
+
+	input moof,            // the image is a MOOF bitstream: floppy_moof.v plays it
 	// spindle duty index 0..399 from rtl/disk_pwm_duty.v
 	input [8:0] disk_pwm,
 	output diskEject,
@@ -147,6 +149,7 @@ module floppy
 	always @(posedge clk) if(cep && dskReadAckD) dskReadDataLatch <= dskReadData;
 		
 	wire [7:0] dskReadDataEnc;
+	wire [21:0] encReadAddr;
 	
 	reg old_newByteReady;
 	always @(posedge clk) old_newByteReady <= newByteReady;
@@ -171,7 +174,7 @@ module floppy
 		.sides   ( doubleSidedDisk ),
 		.track   ( driveTrack ),
 
-		.addr    ( dskReadAddr ),
+		.addr    ( encReadAddr ),
 		.idata   ( dskReadDataLatch ),
 		.odata   ( dskReadDataEnc ),
 
@@ -384,6 +387,7 @@ module floppy
 	reg [3:0] transitionCell;
 	reg [2:0] transitionPulseCount;
 	reg       transitionActive;
+	reg       serTransition;
 	always @(posedge clk or negedge _reset) begin
 		if (!_reset) begin
 			transitionShift      <= 8'd0;
@@ -391,18 +395,18 @@ module floppy
 			transitionCell       <= 4'd0;
 			transitionPulseCount <= 3'd0;
 			transitionActive     <= 1'b0;
-			readTransition       <= 1'b0;
+			serTransition        <= 1'b0;
 		end else if (writePathReset) begin
 			transitionShift      <= 8'd0;
 			transitionBit        <= 3'd0;
 			transitionCell       <= 4'd0;
 			transitionPulseCount <= 3'd0;
 			transitionActive     <= 1'b0;
-			readTransition       <= 1'b0;
+			serTransition        <= 1'b0;
 		end else if (cep) begin
-			readTransition <= 1'b0;
+			serTransition <= 1'b0;
 			if (transitionPulseCount != 0) begin
-				readTransition       <= 1'b1;
+				serTransition        <= 1'b1;
 				transitionPulseCount <= transitionPulseCount - 3'd1;
 			end
 
@@ -414,7 +418,7 @@ module floppy
 			end else if (transitionActive) begin
 				if (transitionCell == 4'd0) begin
 					if (transitionShift[7]) begin
-						readTransition       <= 1'b1;
+						serTransition        <= 1'b1;
 						transitionPulseCount <= 3'd3;
 					end
 					transitionShift <= {transitionShift[6:0], 1'b0};
@@ -427,6 +431,32 @@ module floppy
 			end
 		end
 	end
+
+	// MOOF playback: owns the SDRAM read port and the transition line while a
+	// MOOF image is in. The disk turns while the motor is on.
+	wire [21:0] moofReadAddr;
+	wire        moofTransition;
+
+	floppy_moof moofPlayer
+	(
+		.clk        ( clk ),
+		.cep        ( cep ),
+		.rst        ( !_reset || writePathReset ),
+
+		.active     ( moof && insertDisk && !driveRegs[`DRIVE_REG_CSTIN] ),
+		.spinning   ( !driveRegs[`DRIVE_REG_MOTORON] ),
+		.track      ( driveTrack ),
+		.side       ( driveSide ),
+
+		.addr       ( moofReadAddr ),
+		.rdAck      ( dskReadAckD ),
+		.rdData     ( dskReadData ),
+
+		.transition ( moofTransition )
+	);
+
+	assign dskReadAddr    = moof ? moofReadAddr   : encReadAddr;
+	assign readTransition = moof ? moofTransition : serTransition;
 
 	// create a signal on the falling edge of lstrb
 	reg lstrbPrev;

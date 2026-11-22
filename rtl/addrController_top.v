@@ -243,7 +243,7 @@ module addrController_top(
 
 	// byte offsets of each floppy image within the disk region (rtl/sdram_map.vh)
 	assign memoryAddr =
-		dskReadAckInt ? dskReadAddrInt + `DSK_INT_BYTE_OFF:   // first dsk image at 1MB
+		dskReadAckInt ? dskReadAddrInt + `DSK_INT_BYTE_OFF:   // first dsk image at 0
 		dskReadAckExt ? dskReadAddrExt + `DSK_EXT_BYTE_OFF:   // second dsk image at 2MB
 		dskLoadGrant  ? (dskLoadSelExt ? dskLoadAddrExt + `DSK_EXT_BYTE_OFF : dskLoadAddrInt + `DSK_INT_BYTE_OFF) :
 		dskFetchGrant ? (dskFetchSelExt ? dskFetchAddrExt + `DSK_EXT_BYTE_OFF : dskFetchAddrInt + `DSK_INT_BYTE_OFF) :

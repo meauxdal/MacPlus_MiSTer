@@ -53,6 +53,7 @@ module iwm
 	input [1:0] img800k,    // mounted file is 819,200 bytes: see floppy.v's port comment
 	input drive800k,        // drive mechanism: see floppy.v's port comment
 	input [1:0] mediaSides, // what the medium said at mount: see floppy.v
+	input [1:0] moof,       // the image is a MOOF bitstream: see floppy_moof.v
 	input [8:0] disk_pwm,   // spindle duty index 0..399: see floppy.v's tachometer
 	
 	output [1:0] diskMotor,
@@ -191,6 +192,7 @@ module iwm
 		.img800k(img800k[0]),
 		.drive800k(drive800k),
 		.mediaSides(mediaSides[0]),
+		.moof(moof[0]),
 		.disk_pwm(disk_pwm),
 		.diskEject(diskEject[0]),
 
@@ -236,6 +238,7 @@ module iwm
 		.img800k(img800k[1]),
 		.drive800k(drive800k),
 		.mediaSides(mediaSides[1]),
+		.moof(moof[1]),
 		.disk_pwm(disk_pwm),
 		.diskEject(diskEject[1]),
 
