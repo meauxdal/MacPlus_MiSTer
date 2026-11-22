@@ -34,7 +34,7 @@ module floppy_loader
 	output reg          media_ds,
 
 	// the image is a MOOF bitstream (floppy_moof.v plays it), latched with
-	// `done`; read-only for now, so it also sets readonly_latched
+	// `done`; its INFO write-protect flag also sets readonly_latched
 	output reg          is_moof,
 	output              busy
 );
@@ -139,6 +139,7 @@ wire       sig_wr = (state == SD_WAIT_DONE) && sd_buff_wr && sd_ack &&
                     (sector == 13'd0);
 reg  [3:0] sig_ok;     // one bit per signature word
 reg  [7:0] moof_type;
+reg        moof_wp;    // INFO write protected: the disk's tab was locked
 
 always @(posedge clk_sys) begin
 	if (sniff_rst) sig_ok <= 4'd0;
@@ -149,6 +150,7 @@ always @(posedge clk_sys) begin
 		8'd2:  sig_ok[2] <= (sd_buff_dout == 16'h0AFF);
 		8'd3:  sig_ok[3] <= (sd_buff_dout == 16'h0A0D);
 		8'd10: moof_type <= sd_buff_dout[15:8];         // byte 21
+		8'd11: moof_wp   <= sd_buff_dout[0];            // byte 22
 		default: ;
 		endcase
 	end
@@ -233,9 +235,8 @@ always @(posedge clk_sys) begin
 
 		DONE_PULSE: begin
 			done  <= 1'b1;
-			// MOOF writes are not supported yet: refuse them at the
-			// drive and never write the image back to SD
-			if (moof_seen) readonly_latched <= 1'b1;
+			// a MOOF captured from a locked disk stays locked
+			if (moof_seen && moof_wp) readonly_latched <= 1'b1;
 			state <= IDLE;
 		end
 

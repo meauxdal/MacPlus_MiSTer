@@ -461,6 +461,7 @@ wire [21:0] wc_int_wr_addr, wc_ext_wr_addr;
 wire        wc_int_wr_req,  wc_ext_wr_req;
 wire        wc_int_wr_ack,  wc_ext_wr_ack;
 wire [15:0] wc_int_wr_data, wc_ext_wr_data;
+wire  [1:0] wc_int_wr_ds,   wc_ext_wr_ds;   // byte lanes: MOOF writes single bytes
 
 // commit notice: floppy_sd_writer queues the sector number and fetches the
 // block back out of SDRAM at write time, through the extra-slot-3 read port
@@ -475,6 +476,7 @@ wire        dskLoadRdEn;
 wire [21:0] slot3_int_addr = ldr_int_wr_req ? ldr_int_wr_addr : wc_int_wr_addr;
 wire        slot3_int_req  = ldr_int_wr_req | wc_int_wr_req;
 wire [15:0] slot3_int_data = ldr_int_wr_req ? ldr_int_wr_data : wc_int_wr_data;
+wire  [1:0] slot3_int_ds   = ldr_int_wr_req ? 2'b11           : wc_int_wr_ds;
 wire        slot3_int_ack;
 assign ldr_int_wr_ack = slot3_int_ack &  ldr_int_wr_req;
 assign wc_int_wr_ack  = slot3_int_ack & ~ldr_int_wr_req;
@@ -482,6 +484,7 @@ assign wc_int_wr_ack  = slot3_int_ack & ~ldr_int_wr_req;
 wire [21:0] slot3_ext_addr = ldr_ext_wr_req ? ldr_ext_wr_addr : wc_ext_wr_addr;
 wire        slot3_ext_req  = ldr_ext_wr_req | wc_ext_wr_req;
 wire [15:0] slot3_ext_data = ldr_ext_wr_req ? ldr_ext_wr_data : wc_ext_wr_data;
+wire  [1:0] slot3_ext_ds   = ldr_ext_wr_req ? 2'b11           : wc_ext_wr_ds;
 wire        slot3_ext_ack;
 assign ldr_ext_wr_ack = slot3_ext_ack &  ldr_ext_wr_req;
 assign wc_ext_wr_ack  = slot3_ext_ack & ~ldr_ext_wr_req;
@@ -802,10 +805,12 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.writeProtect({wp_ext, wp_int}),
 	.dskWriteAddrInt(wc_int_wr_addr),
 	.dskWriteDataInt(wc_int_wr_data),
+	.dskWriteDsInt(wc_int_wr_ds),
 	.dskWriteReqInt(wc_int_wr_req),
 	.dskWriteAckInt(wc_int_wr_ack),
 	.dskWriteAddrExt(wc_ext_wr_addr),
 	.dskWriteDataExt(wc_ext_wr_data),
+	.dskWriteDsExt(wc_ext_wr_ds),
 	.dskWriteReqExt(wc_ext_wr_req),
 	.dskWriteAckExt(wc_ext_wr_ack),
 
@@ -997,6 +1002,7 @@ floppy_sd_writer wr_ext
 // word written into SDRAM when dskLoadWrEn is high; dskLoadSelExt is held
 // for the whole grant cycle, the ack pulse comes too late for CAS
 wire [15:0] slot3_wr_data = dskLoadSelExt ? slot3_ext_data : slot3_int_data;
+wire  [1:0] slot3_wr_ds   = dskLoadSelExt ? slot3_ext_ds   : slot3_int_ds;
 
 reg disk_act;
 always @(posedge clk_sys) begin
@@ -1100,7 +1106,7 @@ wire [24:0] sdram_addr = download_cycle ? (`SDRAM_ROM_BASE  + dio_a[20:0])      
                                           (`SDRAM_RAM_BASE  + memoryAddr[21:1]);
 
 wire [15:0] sdram_din  = download_cycle ? dio_data  : dskLoadWrEn ? slot3_wr_data : memoryDataOut;
-wire  [1:0] sdram_ds   = download_cycle ? 2'b11     : dskLoadWrEn ? 2'b11          : { !_memoryUDS, !_memoryLDS };
+wire  [1:0] sdram_ds   = download_cycle ? 2'b11     : dskLoadWrEn ? slot3_wr_ds    : { !_memoryUDS, !_memoryLDS };
 wire        sdram_we   = download_cycle ? dio_write : dskLoadWrEn ? 1'b1           : !_ramWE;
 wire        sdram_oe   = download_cycle ? 1'b0                  : (!_ramOE || !_romOE || dskReadAckInt || dskReadAckExt || dskLoadRdEn);
 wire [15:0] sdram_do   = download_cycle ? 16'hffff : (dskReadAckInt || dskReadAckExt) ? extra_rom_data_demux : sdram_out;

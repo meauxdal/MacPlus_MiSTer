@@ -101,10 +101,12 @@ module dataController_top(
 
 	output [21:0] dskWriteAddrInt,
 	output [15:0] dskWriteDataInt,
+	output  [1:0] dskWriteDsInt,
 	output        dskWriteReqInt,
 	input         dskWriteAckInt,
 	output [21:0] dskWriteAddrExt,
 	output [15:0] dskWriteDataExt,
+	output  [1:0] dskWriteDsExt,
 	output        dskWriteReqExt,
 	input         dskWriteAckExt,
 
@@ -519,10 +521,12 @@ module dataController_top(
 		.writeProtect(writeProtect),
 		.dskWriteAddrInt(dskWriteAddrInt),
 		.dskWriteDataInt(dskWriteDataInt),
+		.dskWriteDsInt(dskWriteDsInt),
 		.dskWriteReqInt(dskWriteReqInt),
 		.dskWriteAckInt(dskWriteAckInt),
 		.dskWriteAddrExt(dskWriteAddrExt),
 		.dskWriteDataExt(dskWriteDataExt),
+		.dskWriteDsExt(dskWriteDsExt),
 		.dskWriteReqExt(dskWriteReqExt),
 		.dskWriteAckExt(dskWriteAckExt),
 

@@ -101,9 +101,12 @@ module floppy
 	input writeReq,        // one-clk pulse: the IWM moved writeData into its shifter
 	input writeProtect,    // 1 = writes refused for this drive (OSD toggle ANDed with img_readonly)
 	input  writeMode,      // IWM Q7: in write mode. Bounds a write for the format relay
+	input  writeCell,      // one-clk pulse per bit cell the IWM shifts out (MOOF)
+	input  writeBit,       // that cell's bit
 
 	output [21:0] dskWriteAddr,
 	output [15:0] dskWriteData,
+	output  [1:0] dskWriteDs,  // byte lanes: 2'b11 for sector images
 	output        dskWriteReq,
 	input         dskWriteAck,
 
@@ -239,7 +242,9 @@ module floppy
 
 			// insertDisk as well as CSTIN: CSTIN is only set by an OS eject and is
 			// not cleared by a remount
-			if (writeReq && _enable == 1'b0 && !writeProtect &&
+			// a MOOF is written bit by bit by floppy_moof.v instead: sector
+			// commits here would land on the bitstream file
+			if (writeReq && _enable == 1'b0 && !writeProtect && !moof &&
 			    !driveRegs[`DRIVE_REG_CSTIN] && insertDisk) begin
 				pendingWriteByte <= writeData;
 				decReady         <= 1'b1;
@@ -294,6 +299,14 @@ module floppy
 		.buf_data     ( wcBufData )
 	);
 
+	// slot-3 writers and commit taps, muxed below the committer
+	wire [21:0] wcWrAddr,   moofWrAddr;
+	wire [15:0] wcWrData,   moofWrData;
+	wire  [1:0]             moofWrDs;
+	wire        wcWrReq,    moofWrReq;
+	wire        wcCommitDone, moofCommitDone;
+	wire [21:0] wcCommitAddr, moofCommitAddr;
+
 	floppy_write_committer wc
 	(
 		.clk          ( clk ),
@@ -304,15 +317,24 @@ module floppy
 		.buf_addr     ( wcBufAddr ),
 		.buf_data     ( wcBufData ),
 
-		.wr_addr      ( dskWriteAddr ),
-		.wr_data      ( dskWriteData ),
-		.wr_req       ( dskWriteReq ),
-		.wr_ack       ( dskWriteAck ),
+		.wr_addr      ( wcWrAddr ),
+		.wr_data      ( wcWrData ),
+		.wr_req       ( wcWrReq ),
+		.wr_ack       ( dskWriteAck && !moof ),
 
 		.busy         (  ),
-		.done         ( dskCommitDone ),
-		.committed_addr ( dskCommitAddr )
+		.done         ( wcCommitDone ),
+		.committed_addr ( wcCommitAddr )
 	);
+
+	// the slot-3 write port and the SD commit tap: the sector committer for
+	// sector images, floppy_moof.v's byte writer for MOOF
+	assign dskWriteAddr  = moof ? moofWrAddr     : wcWrAddr;
+	assign dskWriteData  = moof ? moofWrData     : wcWrData;
+	assign dskWriteDs    = moof ? moofWrDs       : 2'b11;
+	assign dskWriteReq   = moof ? moofWrReq      : wcWrReq;
+	assign dskCommitDone = moof ? moofCommitDone : wcCommitDone;
+	assign dskCommitAddr = moof ? moofCommitAddr : wcCommitAddr;
 	
 	wire [3:0] driveReadAddr = {ca2,ca1,ca0,SEL};
 	
@@ -452,7 +474,20 @@ module floppy
 		.rdAck      ( dskReadAckD ),
 		.rdData     ( dskReadData ),
 
-		.transition ( moofTransition )
+		.transition ( moofTransition ),
+
+		.writing    ( writeMode && !_enable && !writeProtect ),
+		.wrCell     ( writeCell ),
+		.wrBit      ( writeBit ),
+
+		.wrAddr     ( moofWrAddr ),
+		.wrData     ( moofWrData ),
+		.wrDs       ( moofWrDs ),
+		.wrReq      ( moofWrReq ),
+		.wrAck      ( dskWriteAck && moof ),
+
+		.commitDone ( moofCommitDone ),
+		.commitAddr ( moofCommitAddr )
 	);
 
 	assign dskReadAddr    = moof ? moofReadAddr   : encReadAddr;

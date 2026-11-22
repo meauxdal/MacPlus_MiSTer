@@ -71,10 +71,12 @@ module iwm
 
 	output [21:0] dskWriteAddrInt,
 	output [15:0] dskWriteDataInt,
+	output  [1:0] dskWriteDsInt,
 	output        dskWriteReqInt,
 	input         dskWriteAckInt,
 	output [21:0] dskWriteAddrExt,
 	output [15:0] dskWriteDataExt,
+	output  [1:0] dskWriteDsExt,
 	output        dskWriteReqExt,
 	input         dskWriteAckExt,
 
@@ -168,6 +170,12 @@ module iwm
 	wire writeReqInt = writeLoadStrobe && !selectExternalDrive;
 	wire writeReqExt = writeLoadStrobe &&  selectExternalDrive;
 
+	// MOOF drives record each bit cell as it shifts out
+	wire writeCellStrobe;
+	wire writeCellBit;
+	wire writeCellInt = writeCellStrobe && !selectExternalDrive;
+	wire writeCellExt = writeCellStrobe &&  selectExternalDrive;
+
 	floppy floppyInt
 	(
 		.clk(clk),
@@ -206,8 +214,11 @@ module iwm
 		.writeReq(writeReqInt),
 		.writeProtect(writeProtect[0]),
 		.writeMode(q7),
+		.writeCell(writeCellInt),
+		.writeBit(writeCellBit),
 		.dskWriteAddr(dskWriteAddrInt),
 		.dskWriteData(dskWriteDataInt),
+		.dskWriteDs(dskWriteDsInt),
 		.dskWriteReq(dskWriteReqInt),
 		.dskWriteAck(dskWriteAckInt),
 
@@ -252,8 +263,11 @@ module iwm
 		.writeReq(writeReqExt),
 		.writeProtect(writeProtect[1]),
 		.writeMode(q7),
+		.writeCell(writeCellExt),
+		.writeBit(writeCellBit),
 		.dskWriteAddr(dskWriteAddrExt),
 		.dskWriteData(dskWriteDataExt),
+		.dskWriteDs(dskWriteDsExt),
 		.dskWriteReq(dskWriteReqExt),
 		.dskWriteAck(dskWriteAckExt),
 
@@ -621,8 +635,9 @@ module iwm
 	// writes go straight to the shifter, which runs on without byte framing.
 	//
 	// Bit cells are two half-windows long (16 clocks in the Mac's mode $1F, 2
-	// us at 8 MHz). A one is a flux transition at mid-cell (writeFluxStrobe).
-	// The sector-image floppies take whole bytes at the load instead.
+	// us at 8 MHz). A one is a flux transition at mid-cell; writeCellStrobe
+	// marks each mid-cell with its bit for the MOOF player. The sector-image
+	// floppies take whole bytes at the load instead.
 	localparam [2:0] WRITE_IDLE     = 3'd0;
 	localparam [2:0] WRITE_LOAD     = 3'd1;
 	localparam [2:0] WRITE_MIDDLE   = 3'd2;
@@ -640,11 +655,14 @@ module iwm
 	reg       writeModeD;
 	reg       writeLoadStrobeReg;
 	reg [7:0] writeLoadByteReg;
-	reg       writeFluxStrobe; // for a flux-level drive; unused by DSK images
+	reg       writeCellStrobeReg; // a bit cell's mid-point: MOOF drives record it
+	reg       writeCellBitReg;
 
 	// one clk wide at the cen after the load: floppy.v samples it every clk
 	assign writeLoadStrobe = cen && writeLoadStrobeReg;
 	assign writeLoadByte   = writeLoadByteReg;
+	assign writeCellStrobe = cen && writeCellStrobeReg;
+	assign writeCellBit    = writeCellBitReg;
 
 	// Half-window less one, for the down-counter. The 7 MHz fast mode's 7-clock
 	// half-window leaves no time between the load and the first mid-cell; that
@@ -663,13 +681,14 @@ module iwm
 			writeModeD         <= 1'b0;
 			writeLoadStrobeReg <= 1'b0;
 			writeLoadByteReg   <= 8'd0;
-			writeFluxStrobe    <= 1'b0;
+			writeCellStrobeReg <= 1'b0;
+			writeCellBitReg    <= 1'b0;
 			writeBufferEmpty   <= 1'b1; // MAME resets the handshake to $BF
 			writeNoUnderrun    <= 1'b0;
 		end else if (cen) begin
 			writeModeD         <= writeMode;
 			writeLoadStrobeReg <= 1'b0;
-			writeFluxStrobe    <= 1'b0;
+			writeCellStrobeReg <= 1'b0;
 
 			if (!iwmActive)
 				writeNoUnderrun <= 1'b0; // motor off clears bit 6; Q7 low alone does not
@@ -719,7 +738,8 @@ module iwm
 						end
 					end
 					WRITE_MIDDLE: begin
-						writeFluxStrobe <= writeShift[7];
+						writeCellStrobeReg <= 1'b1;
+						writeCellBitReg    <= writeShift[7];
 						writeShift      <= {writeShift[6:0], 1'b0};
 						writeState      <= WRITE_END;
 						writeTimer      <= writeHalfM1;
