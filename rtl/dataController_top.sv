@@ -411,6 +411,17 @@ module dataController_top(
 	end
 
 	// Keyboard control
+	//
+	// kbd_wait_timer bounds the wait for the Mac to raise the data line after
+	// a command. Without it, a Mac that starts a new command instead (all
+	// commands have MSB 0, so the line just stays low) or a garbled command
+	// that ps2_kbd never answers leaves both sides waiting forever: keys die
+	// until a Mac reset. A real keyboard can't wedge like this; its 8021 sits
+	// behind a 74LS123 watchdog (~56 ms) that resets it to idle. We allow
+	// 2^21 clk8 ticks (~262 ms), restarted when the reply is ready, which
+	// covers ps2_kbd's ~131 ms inquiry timeout. After the abort, a line held
+	// low starts the next command as usual.
+	reg [20:0] kbd_wait_timer;
 	always @(posedge clk32) begin
 		reg kbdclk_d;
 		reg ADBListenD;
@@ -419,6 +430,7 @@ module dataController_top(
 			kbd_transmitting <= 0;
 			kbd_wait_receiving <= 0;
 			kbd_data_valid <= 0;
+			kbd_wait_timer <= 0;
 			ADBListenD <= 0;
 		end else if (clk8_en_p) begin
 			if (kbd_in_strobe && !machineType) begin
@@ -461,6 +473,17 @@ module dataController_top(
 				kbd_receiving <= 1;
 				kbd_transmitting <= 0;
 			end
+
+			// Give up on a Mac that never asks for the reply (see above)
+			if (!kbd_wait_receiving || kbd_in_strobe)
+				kbd_wait_timer <= 0;
+			else if (&kbd_wait_timer) begin
+				kbd_wait_receiving <= 0;
+				kbd_transmitting <= 0;
+				kbd_data_valid <= 0;
+				kbd_bitcnt <= 0;
+			end else
+				kbd_wait_timer <= kbd_wait_timer + 1'd1;
 
 			// send/receive bits at rising edge of the keyboard clock
 			if (~kbdclk_d & kbdclk) begin
