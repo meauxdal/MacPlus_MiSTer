@@ -67,7 +67,7 @@ module iwm
 	input [7:0] dskReadData,
 
 	// floppy write path
-	input [1:0] writeProtect, // {ext,int} - OSD toggle ANDed with img_readonly, per drive
+	input [1:0] writeProtect, // {ext,int} - per drive, latched at mount (see floppy_loader.v)
 
 	output [21:0] dskWriteAddrInt,
 	output [15:0] dskWriteDataInt,

@@ -99,7 +99,7 @@ module floppy
 
 	// floppy write path
 	input writeReq,        // one-clk pulse: the IWM moved writeData into its shifter
-	input writeProtect,    // 1 = writes refused for this drive (OSD toggle ANDed with img_readonly)
+	input writeProtect,    // 1 = writes refused for this drive (img_readonly, Floppy lock or MOOF WP, latched at mount)
 	input  writeMode,      // IWM Q7: in write mode. Bounds a write for the format relay
 	input  writeCell,      // one-clk pulse per bit cell the IWM shifts out (MOOF)
 	input  writeBit,       // that cell's bit

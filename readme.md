@@ -33,7 +33,7 @@ Internal and external floppy disk drives are both supported. The first and secon
 
 Floppy disk images need to be in raw disk format (a.k.a. DiskDup format) with a .dsk extension. Single-sided 400k disk images must be exactly 409,600 bytes in size. Double-sided 800k disk images must be exactly 819,200 bytes in size.  Disk Copy 4.2 files are not currently supported. They are largely the same as raw disk format, but include an additional 84-byte header. A tool to convert DC42 format to dsk is available [here](https://www.bigmessowires.com/2013/12/16/macintosh-diskcopy-4-2-floppy-image-converter/).
 
-Floppy disk images are writable when "Floppy Write" is set to On (the default is Off). An image marked read-only on the SD card stays write-protected. Disks can be erased and reformatted from the Mac (Special > Erase Disk), One-Sided or Two-Sided; an 800k image erased One-Sided becomes a 400k volume.
+Floppy disk images are writable by default. Setting "Floppy lock" to On write-protects disks inserted afterwards, like sliding a disk's write-protect tab; a disk that is already mounted keeps the state it was inserted with. An image marked read-only on the SD card, or a MOOF whose own write-protect flag is set, stays write-protected either way. Disks can be erased and reformatted from the Mac (Special > Erase Disk), One-Sided or Two-Sided; an 800k image erased One-Sided becomes a 400k volume.
 
 Floppy disk images cannot be loaded while the Mac accesses a floppy disk. Thus, it's recommended to wait for the desktop to appear until a second floppy can be inserted. Before loading a different disk image, it's recommended to eject the previously inserted disk image from within the OS.
 

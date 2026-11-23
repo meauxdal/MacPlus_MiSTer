@@ -85,7 +85,9 @@ localparam CONF_STR = {
 	// three bits for five models; layout change, hence the config version bump
 	"O13,Model,Plus,SE,512K,128K,512Ke;",
 	"O5,Speed,8MHz,16MHz;",
-	"O6,Floppy Write,Off,On;",
+	// Floppy lock acts like a disk's write-protect tab: sampled at insert, so
+	// toggling it affects only the next mount (MacLC475's behavior)
+	"O9,Floppy lock,Off,On;",
 	// host mouse counts per Mac count: the Plus counts 180/inch, so cpi/180 is pixel-exact
 	"OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16;",
 	"ODE,CPU,68000,68010,68020;",
@@ -489,10 +491,11 @@ wire        slot3_ext_ack;
 assign ldr_ext_wr_ack = slot3_ext_ack &  ldr_ext_wr_req;
 assign wc_ext_wr_ack  = slot3_ext_ack & ~ldr_ext_wr_req;
 
-// OSD write-protect toggle (defaults to protected/status[6]=0), ANDed per
-// drive with that drive's own latched img_readonly - see floppy_loader.v.
-wire wp_int = ~status[6] | ldr_int_readonly;
-wire wp_ext = ~status[6] | ldr_ext_readonly;
+// Per-drive write protect, latched by floppy_loader.v at mount from the
+// image's read-only flag, the OSD Floppy lock, and a MOOF's own WP flag.
+wire floppy_lock = status[9];
+wire wp_int = ldr_int_readonly;
+wire wp_ext = ldr_ext_readonly;
 
 wire cpu_wait_hold;  // see cpu_wait below
 
@@ -886,7 +889,7 @@ floppy_loader ldr_int
 
 	.img_mounted(img_mounted[2]),
 	.img_size(img_size),
-	.img_readonly(img_readonly),
+	.img_readonly(img_readonly | floppy_lock),
 
 	.sd_lba(ldr_int_sd_lba),
 	.sd_rd(ldr_int_sd_rd),
@@ -916,7 +919,7 @@ floppy_loader ldr_ext
 
 	.img_mounted(img_mounted[3]),
 	.img_size(img_size),
-	.img_readonly(img_readonly),
+	.img_readonly(img_readonly | floppy_lock),
 
 	.sd_lba(ldr_ext_sd_lba),
 	.sd_rd(ldr_ext_sd_rd),
