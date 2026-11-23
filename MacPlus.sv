@@ -85,9 +85,9 @@ localparam CONF_STR = {
 	// three bits for five models; layout change, hence the config version bump
 	"O13,Model,Plus,SE,512K,128K,512Ke;",
 	"O5,Speed,8MHz,16MHz;",
-	// Floppy lock acts like a disk's write-protect tab: sampled at insert, so
-	// toggling it affects only the next mount (MacLC475's behavior)
-	"O9,Floppy lock,Off,On;",
+	// acts like a disk's write-protect tab: sampled at insert, so toggling it
+	// affects only the next mount (MacLC475's "Floppy lock" behavior)
+	"O9,Floppy Write Protect,Off,On;",
 	// host mouse counts per Mac count: the Plus counts 180/inch, so cpi/180 is pixel-exact
 	"OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16;",
 	"ODE,CPU,68000,68010,68020;",
@@ -492,7 +492,8 @@ assign ldr_ext_wr_ack = slot3_ext_ack &  ldr_ext_wr_req;
 assign wc_ext_wr_ack  = slot3_ext_ack & ~ldr_ext_wr_req;
 
 // Per-drive write protect, latched by floppy_loader.v at mount from the
-// image's read-only flag, the OSD Floppy lock, and a MOOF's own WP flag.
+// image's read-only flag, the OSD Floppy Write Protect, and a MOOF's own
+// WP flag.
 wire floppy_lock = status[9];
 wire wp_int = ldr_int_readonly;
 wire wp_ext = ldr_ext_readonly;
