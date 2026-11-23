@@ -60,42 +60,55 @@ video_freak video_freak
 `include "build_id.v" 
 localparam CONF_STR = {
 	"MACPLUS;UART115200;",
-	"-;",
 	"S2,DSKMO*,Mount Pri Floppy;",
 	"S3,DSKMO*,Mount Sec Floppy;",
-	"-;",
-	"D0SC0,IMGVHD,Mount SCSI-6;",
-	"D0SC1,IMGVHD,Mount SCSI-5;",
-	"-;",
-	// CD-ROM (SCSI ID 3): CUE/BIN/CHD/TOAST are flattened host-side by
-	// Main_MiSTer's support/mac to 2048-byte sectors; audio tracks are played
-	// by rtl/cd_audio.sv. The extension list must match MacLC.sv's.
-	// D0: greyed out on a model with no SCSI bus (status_menumask bit 0)
-	"D0SC4,ISOTO*CUEBINCHD,Mount CD-ROM;",
-	// Apple HD20 on the external floppy port, a hard disk image like SCSI
-	"SC5,IMGVHD,Mount HD20;",
-	"D0OI,CD-ROM Drive,Enabled,Disabled;",
-	// index 0 = Full: `status` defaults to zero. Independent of the Mac's own
-	// volume, as the drive's knob was
-	"D0OFG,CD Volume,Full,3/4,1/2,Off;",
-	"-;",
-	"O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-	"OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
-	"-;",
-	// three bits for five models; layout change, hence the config version bump
-	"O13,Model,Plus,SE,512K,128K,512Ke;",
-	"O5,Speed,8MHz,16MHz;",
 	// acts like a disk's write-protect tab: sampled at insert, so toggling it
 	// affects only the next mount (MacLC475's "Floppy lock" behavior)
 	"O9,Floppy Write Protect,Off,On;",
-	// host mouse counts per Mac count: the Plus counts 180/inch, so cpi/180 is pixel-exact
-	"OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16;",
+	"-;",
+	// D0: greyed out on a model with no SCSI bus (status_menumask bit 0)
+	"D0SC0,IMGVHD,Mount SCSI-6;",
+	"D0SC1,IMGVHD,Mount SCSI-5;",
+	// SCSI ID 3: data CDs and audio CDs alike. CUE/BIN/CHD/TOAST are
+	// flattened host-side by Main_MiSTer's support/mac to 2048-byte sectors;
+	// audio tracks are played by rtl/cd_audio.sv. The extension list must
+	// match MacLC.sv's.
+	"D0SC4,ISOTO*CUEBINCHD,Mount CD;",
+	// Apple HD20 on the external floppy port, a hard disk image like SCSI
+	"SC5,IMGVHD,Mount HD20;",
+	"-;",
+	// Model, CPU and Memory are sampled at reset; Speed applies live.
+	// Three bits for five models.
+	"O13,Model,Plus,SE,512K,128K,512Ke;",
 	"ODE,CPU,68000,68010,68020;",
 	"D1O4,Memory,1MB,4MB;",
+	"O5,Speed,8MHz,16MHz;",
 	"-;",
-	//"OA,Serial,Off,On;",
-	//"-;",
+	"P1,Video;",
+	"P2,Advanced;",
+	"-;",
+	// shown while Model, CPU or Memory differ from what the last reset
+	// latched (status_menumask bit 2, as in MacLC.sv)
+	"h2-,Changes pending;",
 	"R0,Reset & Apply CPU+Memory;",
+
+	"P1O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+	"P1OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
+
+	"D0P2OI,CD Drive,Enabled,Disabled;",
+	// index 0 = Full: `status` defaults to zero. Independent of the Mac's own
+	// volume, as the drive's knob was
+	"D0P2OFG,CD Volume,Full,3/4,1/2,Off;",
+	"P2-;",
+	// host mouse counts per Mac count: the Plus counts 180/inch, so cpi/180
+	// is pixel-exact
+	"P2OMP,Mouse Speed,8,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16;",
+	"P2-;",
+	// bit 17, not the freed bit 6: a saved "Floppy Write On" left bit 6 set
+	"P2OH,Swap Alt/Win keys,No,Yes;",
+
+	// Menu pages only regroup the items; every status bit is unchanged, so
+	// saved settings carry over without a config version bump.
 	"v,1;", // [optional] config version 0-99.
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			// so all options will get default values on first start.
@@ -222,6 +235,25 @@ wire        ioctl_write;
 reg         ioctl_wait = 0;
 
 wire [10:0] ps2_key;
+
+// OSD Swap Alt/Win keys: Alt is Command and Win is Option by default (both
+// keyboard paths). Swapped, Alt becomes Option and Win becomes Command. Right
+// Win has no mapping of its own, so swapped, right Alt joins left as Option.
+wire       swap_altwin = status[17];
+reg [10:0] ps2_key_mac;
+always @(*) begin
+	ps2_key_mac = ps2_key;
+	if (swap_altwin) begin
+		case (ps2_key[8:0])
+			9'h011: ps2_key_mac[8:0] = 9'h11f; // left Alt  -> Option
+			9'h111: ps2_key_mac[8:0] = 9'h11f; // right Alt -> Option
+			9'h11f: ps2_key_mac[8:0] = 9'h011; // left Win  -> Command
+			9'h127: ps2_key_mac[8:0] = 9'h111; // right Win -> Command
+			default: ;
+		endcase
+	end
+end
+
 wire [24:0] ps2_mouse;
 wire        capslock;
 
@@ -372,7 +404,13 @@ mac_model mac_model_menu
 );
 
 // Bit set = item unavailable, which is what uppercase D reads as.
-assign status_menumask = {14'd0, menu_ramSoldered, ~menu_scsiPresent};
+// Model, CPU and Memory wait for reset; bit 2 shows "Changes pending" until
+// the reset latches them. Speed, CD and the other options apply live.
+wire osd_pending = (status[3:1]   != status_model) |
+                   (status[14:13] != status_cpu)   |
+                   (status[4]     != status_mem);
+
+assign status_menumask = {13'd0, osd_pending, menu_ramSoldered, ~menu_scsiPresent};
 			  
 //
 // Serial Ports
@@ -762,7 +800,7 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 	.memoryLatch(memoryLatch),
 
 	// peripherals
-	.ps2_key(ps2_key), 
+	.ps2_key(ps2_key_mac),
 	.capslock(capslock),
 	.ps2_mouse(ps2_mouse),
 	.mouseDiv(mouse_div),
