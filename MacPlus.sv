@@ -98,6 +98,9 @@ localparam CONF_STR = {
 	// the 256 PRAM bytes, kept across core loads (PRAM image block below);
 	// MacLC.sv has the same slot
 	"P2SC6,NVR,PRAM image;",
+	// bit 20 has never been used: a momentary option on a bit an old saved
+	// config left set would fire at every core load
+	"P2RK,Clear PRAM and reset;",
 	"P2-;",
 	"D0P2OI,CD Drive,Enabled,Disabled;",
 	// index 0 = Full: `status` defaults to zero. Independent of the Mac's own
@@ -421,6 +424,9 @@ mac_model mac_model_menu
 //         into the newly mounted file.
 //   save: about 2 s after the Mac's last PRAM write, and when the OSD
 //         opens.
+//   clear (OSD): zero PRAM and the image, then restart the Mac, which
+//         finds no $A8 validity byte (nor 'NuMc' in XPRAM) and writes
+//         its defaults. The Mac stays in reset until the zeros are saved.
 // The sector streams straight to and from the RTC's second RAM port, so
 // there is no staging buffer.
 
@@ -444,25 +450,30 @@ wire [7:0] pram_host_addr = pram_ld_we ? pram_ld_addr : {sd_buff_addr[6:0], pram
 assign     sd_buff_din[VD_PRAM] = {pram_rd_hi, pram_rd_lo};
 
 localparam [2:0] P_IDLE = 0, P_LD_RD = 1, P_LD_KICK = 2, P_LD_DAT = 3,
-                 P_SV_WR = 4, P_SV_DAT = 5;
+                 P_SV_WR = 4, P_SV_DAT = 5, P_CLR = 6;
 reg  [2:0] pram_st = P_IDLE;
 reg        pram_ena = 0;            // a loaded image takes saves
 reg        pram_dirty = 0;          // the Mac wrote PRAM since the last save
 reg        pram_load_pending = 0, pram_save_pending = 0;
 reg        pram_mount_deferred = 0; // OSD mount waiting for the next reset
+reg        pram_clr_pending = 0, pram_clearing = 0, old_clr = 0;
+reg  [7:0] pram_cnt;
 reg        old_pack = 0, old_osd = 0, old_pmnt = 0;
 reg [25:0] pram_settle = 0;         // save timer, restarts on every write
 reg [24:0] osd_recent = 0;          // OSD open, or closed under ~1 s ago
 reg [24:0] pram_wd = 0;             // ~1 s watchdog per SD request
 reg  [1:0] pram_try = 0;
 
-assign pram_hold = pram_load_pending | (pram_st == P_LD_RD) |
+assign pram_hold = pram_load_pending | pram_clr_pending | pram_clearing |
+                   (pram_st == P_LD_RD) |
                    (pram_st == P_LD_KICK) | (pram_st == P_LD_DAT);
 
 always @(posedge clk_sys) begin
 	old_pack <= pram_ack;
 	old_osd  <= OSD_STATUS;
 	old_pmnt <= img_mounted[VD_PRAM];
+	old_clr  <= status[20];
+	if (status[20] && !old_clr) pram_clr_pending <= 1;
 
 	// read side of the host port
 	pram_rd_ph   <= ~pram_rd_ph;
@@ -517,8 +528,15 @@ always @(posedge clk_sys) begin
 	end
 
 	case (pram_st)
-	P_IDLE:
-		if (pram_load_pending) begin
+	P_IDLE: begin
+		pram_clearing <= 0;
+		if (pram_clr_pending) begin
+			pram_clr_pending <= 0;
+			pram_clearing <= 1;
+			pram_cnt <= 0;
+			pram_st <= P_CLR;
+		end
+		else if (pram_load_pending) begin
 			pram_load_pending <= 0;
 			pram_sd_rd <= 1;
 			pram_wd <= 0;
@@ -534,6 +552,23 @@ always @(posedge clk_sys) begin
 				pram_st <= P_SV_WR;
 			end
 		end
+	end
+
+	P_CLR: begin
+		pram_ld_we   <= 1;
+		pram_ld_addr <= pram_cnt;
+		pram_ld_data <= 0;
+		pram_cnt <= pram_cnt + 1'd1;
+		if (&pram_cnt) begin
+			if (pram_ena) begin
+				pram_dirty <= 0;
+				pram_sd_wr <= 1;
+				pram_wd <= 0;
+				pram_st <= P_SV_WR;
+			end
+			else pram_st <= P_IDLE;
+		end
+	end
 
 	// The HPS is busiest at core start (ROM, every slot mounting): re-kick
 	// an unanswered read up to three times, then boot without the image.

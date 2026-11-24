@@ -96,3 +96,5 @@ The Mac keeps settings such as the sound volume, the mouse and keyboard settings
 - loads it when the core starts (if the Mac is already running by then, it restarts once to use it);
 - saves it a couple of seconds after the Mac last changes PRAM, and whenever the OSD opens;
 - when you mount a different image while the Mac is running, shows "Changes pending" and switches to the new image at the next reset. The running Mac's settings are not saved into the new file.
+
+"Clear PRAM and reset" under Advanced clears PRAM, and the mounted image with it, then restarts the Mac, which writes its default settings. The Plus ROM has no keyboard shortcut for this, and the original's equivalent was removing the battery.
