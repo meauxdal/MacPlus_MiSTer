@@ -66,6 +66,12 @@ module dataController_top(
 
 	// RTC
 	input [32:0] timestamp,
+	// PRAM host port for the .NVR image, see rtl/rtc.v
+	input        pram_host_we,
+	input  [7:0] pram_host_addr,
+	input  [7:0] pram_host_din,
+	output [7:0] pram_host_dout,
+	output       pram_guest_wr,
 
 	// video:
 	output pixelOut,	
@@ -369,7 +375,12 @@ module dataController_top(
 		._cs        (_rtccs),
 		.ck         (rtcck),
 		.dat_i      (rtcdat_i),
-		.dat_o      (rtcdat_o)
+		.dat_o      (rtcdat_o),
+		.host_we    (pram_host_we),
+		.host_addr  (pram_host_addr),
+		.host_din   (pram_host_din),
+		.host_dout  (pram_host_dout),
+		.guest_wr   (pram_guest_wr)
 	);
 
 	wire _ADBint;

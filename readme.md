@@ -88,3 +88,11 @@ The Alt key is mapped to the Mac's Command (⌘) key, and the Windows key is map
 ## Mouse
 
 "Mouse Speed" sets how many host mouse counts make one Mac mouse count; higher is slower. The default of 8 suits a typical mouse of about 1400 cpi. It applies to the Plus mouse and the SE's ADB mouse alike.
+
+## PRAM
+
+The Mac keeps settings such as the sound volume, the mouse and keyboard settings and the alarm clock in parameter RAM (PRAM). The core models the Plus clock chip with its 256 bytes on every model; the 128K and 512K ROMs use only the first 20 bytes, as on the originals. To keep PRAM across core loads, mount an image with "PRAM image" under Advanced; a default one is included as `releases/MacPlus.nvr`. The core then:
+
+- loads it when the core starts (if the Mac is already running by then, it restarts once to use it);
+- saves it a couple of seconds after the Mac last changes PRAM, and whenever the OSD opens;
+- when you mount a different image while the Mac is running, shows "Changes pending" and switches to the new image at the next reset. The running Mac's settings are not saved into the new file.

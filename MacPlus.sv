@@ -95,6 +95,10 @@ localparam CONF_STR = {
 	"P1O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
 
+	// the 256 PRAM bytes, kept across core loads (PRAM image block below);
+	// MacLC.sv has the same slot
+	"P2SC6,NVR,PRAM image;",
+	"P2-;",
 	"D0P2OI,CD Drive,Enabled,Disabled;",
 	// index 0 = Full: `status` defaults to zero. Independent of the Mac's own
 	// volume, as the drive's knob was
@@ -159,13 +163,14 @@ pll pll
 reg       status_mem;
 reg [1:0] status_cpu;
 reg [2:0] status_model;
+wire      pram_hold;   // a PRAM image load holds the Mac in reset
 reg       n_reset = 0;
 always @(posedge clk_sys) begin
 	reg [15:0] rst_cnt;
 
 	if (clk8_en_p) begin
 		// various sources can reset the mac
-		if(~pll_locked || status[0] || buttons[1] || RESET || ~_cpuReset_o) begin
+		if(~pll_locked || status[0] || buttons[1] || RESET || ~_cpuReset_o || pram_hold) begin
 			rst_cnt <= '1;
 			n_reset <= 0;
 		end
@@ -187,8 +192,10 @@ end
 // (the ncr5380's device order, not the hps_io slot order; see below)
 localparam SCSI_DEVS   = 3;
 localparam SCSI_CD_DEV = 2;
-// VDNUM: slots 0/1 SCSI disks, 2/3 floppies, 4 CD-ROM, 5 the HD20
-localparam VDNUM = 6;
+// VDNUM: slots 0/1 SCSI disks, 2/3 floppies, 4 CD-ROM, 5 the HD20,
+// 6 the PRAM image. Slot 7 must stay empty: Main's mount notice uses
+// bit 7 as the read-only flag (see MacLC.sv).
+localparam VDNUM = 7;
 
 // the status register is controlled by the on screen display (OSD)
 wire [31:0] status;
@@ -403,12 +410,191 @@ mac_model mac_model_menu
 	.ramSoldered   ( menu_ramSoldered  )
 );
 
+/////////////////////////////  PRAM image  /////////////////////////////
+// PRAM persistence, after MacLC.sv. Sector 0 of a .NVR image on slot 6
+// holds the 256 XPRAM bytes (the rest of the 512-byte sector is padding).
+//   load: when the image mounts. The Mac is held in reset until the load
+//         ends, so it boots on the loaded PRAM; an image auto-mounted at
+//         core start after the Mac is already up restarts it once.
+//   OSD mount while the Mac runs: waits for the next reset, with Changes
+//         pending shown meanwhile. The running Mac's PRAM is not saved
+//         into the newly mounted file.
+//   save: about 2 s after the Mac's last PRAM write, and when the OSD
+//         opens.
+// The sector streams straight to and from the RTC's second RAM port, so
+// there is no staging buffer.
+
+localparam VD_PRAM = 6;
+
+wire       pram_ack = sd_ack[VD_PRAM];
+reg        pram_sd_rd = 0, pram_sd_wr = 0;
+assign     sd_lba[VD_PRAM] = 0;
+
+// RTC host port. A load writes each received word as two bytes on
+// consecutive clocks; otherwise the port alternates between the two bytes
+// of the word at sd_buff_addr, so sd_buff_din follows the address within
+// three clocks (hps_io holds it far longer between words).
+reg        pram_ld_we = 0, pram_ld_hi = 0;
+reg  [7:0] pram_ld_addr, pram_ld_data, pram_ld_next;
+reg        pram_rd_ph = 0, pram_rd_ph_d = 0;
+reg  [7:0] pram_rd_lo, pram_rd_hi;
+wire [7:0] pram_host_dout;
+wire       pram_guest_wr;
+wire [7:0] pram_host_addr = pram_ld_we ? pram_ld_addr : {sd_buff_addr[6:0], pram_rd_ph};
+assign     sd_buff_din[VD_PRAM] = {pram_rd_hi, pram_rd_lo};
+
+localparam [2:0] P_IDLE = 0, P_LD_RD = 1, P_LD_KICK = 2, P_LD_DAT = 3,
+                 P_SV_WR = 4, P_SV_DAT = 5;
+reg  [2:0] pram_st = P_IDLE;
+reg        pram_ena = 0;            // a loaded image takes saves
+reg        pram_dirty = 0;          // the Mac wrote PRAM since the last save
+reg        pram_load_pending = 0, pram_save_pending = 0;
+reg        pram_mount_deferred = 0; // OSD mount waiting for the next reset
+reg        old_pack = 0, old_osd = 0, old_pmnt = 0;
+reg [25:0] pram_settle = 0;         // save timer, restarts on every write
+reg [24:0] osd_recent = 0;          // OSD open, or closed under ~1 s ago
+reg [24:0] pram_wd = 0;             // ~1 s watchdog per SD request
+reg  [1:0] pram_try = 0;
+
+assign pram_hold = pram_load_pending | (pram_st == P_LD_RD) |
+                   (pram_st == P_LD_KICK) | (pram_st == P_LD_DAT);
+
+always @(posedge clk_sys) begin
+	old_pack <= pram_ack;
+	old_osd  <= OSD_STATUS;
+	old_pmnt <= img_mounted[VD_PRAM];
+
+	// read side of the host port
+	pram_rd_ph   <= ~pram_rd_ph;
+	pram_rd_ph_d <= pram_rd_ph;
+	if (pram_rd_ph_d) pram_rd_hi <= pram_host_dout;
+	else              pram_rd_lo <= pram_host_dout;
+
+	// load side: low byte on the strobe, high byte the clock after
+	pram_ld_we <= 0;
+	if ((pram_st == P_LD_RD || pram_st == P_LD_DAT) && pram_ack && sd_buff_wr &&
+	    sd_buff_addr < 13'd128) begin
+		pram_ld_we   <= 1;
+		pram_ld_addr <= {sd_buff_addr[6:0], 1'b0};
+		pram_ld_data <= sd_buff_dout[7:0];
+		pram_ld_next <= sd_buff_dout[15:8];
+		pram_ld_hi   <= 1;
+	end
+	else if (pram_ld_hi) begin
+		pram_ld_we   <= 1;
+		pram_ld_addr <= {pram_ld_addr[7:1], 1'b1};
+		pram_ld_data <= pram_ld_next;
+		pram_ld_hi   <= 0;
+	end
+
+	// A file picked in the OSD shows up just after the OSD closes, hence
+	// osd_recent.
+	if (OSD_STATUS)      osd_recent <= '1;
+	else if (osd_recent) osd_recent <= osd_recent - 1'd1;
+
+	if (pram_guest_wr) begin
+		pram_dirty  <= 1;
+		pram_settle <= 26'd62_668_800;      // 2 s of clk_sys
+	end
+	else if (pram_settle) begin
+		pram_settle <= pram_settle - 1'd1;
+		if (pram_settle == 1) pram_save_pending <= 1;
+	end
+	if (OSD_STATUS && !old_osd) pram_save_pending <= 1;
+
+	if (img_mounted[VD_PRAM] && !old_pmnt) begin
+		pram_ena <= 0;
+		pram_mount_deferred <= 0;
+		pram_save_pending <= 0;
+		if (img_size != 0) begin
+			if (OSD_STATUS || osd_recent) pram_mount_deferred <= 1;
+			else                          pram_load_pending <= 1;
+		end
+	end
+	else if (pram_mount_deferred && !n_reset) begin
+		pram_mount_deferred <= 0;
+		pram_load_pending <= 1;
+	end
+
+	case (pram_st)
+	P_IDLE:
+		if (pram_load_pending) begin
+			pram_load_pending <= 0;
+			pram_sd_rd <= 1;
+			pram_wd <= 0;
+			pram_try <= 0;
+			pram_st <= P_LD_RD;
+		end
+		else if (pram_save_pending) begin
+			pram_save_pending <= 0;
+			if (pram_ena && pram_dirty) begin
+				pram_dirty <= 0;            // writes during the save re-dirty
+				pram_sd_wr <= 1;
+				pram_wd <= 0;
+				pram_st <= P_SV_WR;
+			end
+		end
+
+	// The HPS is busiest at core start (ROM, every slot mounting): re-kick
+	// an unanswered read up to three times, then boot without the image.
+	P_LD_RD:
+		if (pram_ack) begin
+			pram_sd_rd <= 0;
+			pram_wd <= 0;
+			pram_st <= P_LD_DAT;
+		end
+		else if (&pram_wd) begin
+			pram_sd_rd <= 0;
+			pram_wd <= 0;
+			if (pram_try == 3) pram_st <= P_IDLE;
+			else begin
+				pram_try <= pram_try + 1'd1;
+				pram_st <= P_LD_KICK;
+			end
+		end
+		else pram_wd <= pram_wd + 1'd1;
+	P_LD_KICK: begin
+		pram_sd_rd <= 1;
+		pram_st <= P_LD_RD;
+	end
+	P_LD_DAT:
+		if (old_pack && !pram_ack) begin
+			pram_ena <= 1;
+			pram_dirty <= 0;
+			pram_st <= P_IDLE;
+		end
+		else if (&pram_wd) pram_st <= P_IDLE;
+		else pram_wd <= pram_wd + 1'd1;
+
+	P_SV_WR:
+		if (pram_ack) begin
+			pram_sd_wr <= 0;
+			pram_wd <= 0;
+			pram_st <= P_SV_DAT;
+		end
+		else if (&pram_wd) begin
+			pram_sd_wr <= 0;
+			pram_dirty <= 1;                // retry on the next trigger
+			pram_st <= P_IDLE;
+		end
+		else pram_wd <= pram_wd + 1'd1;
+	P_SV_DAT:
+		if (old_pack && !pram_ack) pram_st <= P_IDLE;
+		else if (&pram_wd) pram_st <= P_IDLE;
+		else pram_wd <= pram_wd + 1'd1;
+
+	default: pram_st <= P_IDLE;
+	endcase
+end
+
 // Bit set = item unavailable, which is what uppercase D reads as.
 // Model, CPU and Memory wait for reset; bit 2 shows "Changes pending" until
-// the reset latches them. Speed, CD and the other options apply live.
+// the reset latches them, or loads a PRAM image mounted from the OSD.
+// Speed, CD and the other options apply live.
 wire osd_pending = (status[3:1]   != status_model) |
                    (status[14:13] != status_cpu)   |
-                   (status[4]     != status_mem);
+                   (status[4]     != status_mem)   |
+                   pram_mount_deferred;
 
 assign status_menumask = {13'd0, osd_pending, menu_ramSoldered, ~menu_scsiPresent};
 			  
@@ -812,6 +998,11 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 
 	// rtc unix ticks
 	.timestamp(TIMESTAMP),
+	.pram_host_we(pram_ld_we),
+	.pram_host_addr(pram_host_addr),
+	.pram_host_din(pram_ld_data),
+	.pram_host_dout(pram_host_dout),
+	.pram_guest_wr(pram_guest_wr),
 
 	// video
 	._hblank(_hblank),
@@ -898,8 +1089,8 @@ dataController_top #(.SCSI_DEVS(SCSI_DEVS), .SCSI_CD_DEV(SCSI_CD_DEV)) dc0
 // HD20 requests are combined into the full VDNUM vectors here.
 wire ldr_int_sd_rd, ldr_ext_sd_rd;
 wire wr_int_sd_wr,  wr_ext_sd_wr;
-assign sd_rd = {dcd_sd_rd, scsi_sd_rd[SCSI_CD_DEV], ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd[1:0]};
-assign sd_wr = {dcd_sd_wr, scsi_sd_wr[SCSI_CD_DEV], wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr[1:0]};
+assign sd_rd = {pram_sd_rd, dcd_sd_rd, scsi_sd_rd[SCSI_CD_DEV], ldr_ext_sd_rd, ldr_int_sd_rd, scsi_sd_rd[1:0]};
+assign sd_wr = {pram_sd_wr, dcd_sd_wr, scsi_sd_wr[SCSI_CD_DEV], wr_ext_sd_wr, wr_int_sd_wr, scsi_sd_wr[1:0]};
 
 // sd_lba is shared per slot: the loader's while it is busy, else the writer's
 wire [31:0] ldr_int_sd_lba, ldr_ext_sd_lba;
