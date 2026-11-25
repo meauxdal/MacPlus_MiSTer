@@ -32,5 +32,15 @@ set_global_assignment -name VERILOG_FILE rtl/cpu_wait.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/dataController_top.sv
 set_global_assignment -name VERILOG_FILE rtl/videoTimer.v
 set_global_assignment -name VERILOG_FILE rtl/videoShifter.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv525_pipeline.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv525_video.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv525_timing.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv_buffered_canvas.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv_video_capture.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv_capture_fifo.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv_frame_store.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv_deflicker.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv_ddram_bridge.sv
+set_global_assignment -name VERILOG_FILE rtl/pll_tv.v
 set_global_assignment -name VERILOG_FILE rtl/rtc.v 
 set_global_assignment -name SYSTEMVERILOG_FILE MacPlus.sv

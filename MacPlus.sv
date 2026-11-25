@@ -30,7 +30,9 @@ module emu
 assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
 
-assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0; 
+`ifndef MAC_TV525
+assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0;
+`endif
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 assign LED_USER  = dio_download || ldr_int_busy || ldr_ext_busy || wr_int_busy || wr_ext_busy || (disk_act ^ |diskMotor);
@@ -89,6 +91,9 @@ localparam CONF_STR = {
 	// Select), Main lists items in CONF_STR order.
 	"P1,Video;",
 	"P1-;",
+	`ifdef MAC_TV525
+	"P1O1A1B,Deflicker,Strong,Mild,Off;",
+	`endif
 	"P1O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
 
@@ -316,6 +321,74 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(VDNUM), .WIDE(1)) hps_io
 	.ps2_mouse(ps2_mouse)
 );
 
+`ifdef MAC_TV525
+wire clk_tv525, tv_pll_locked;
+wire [23:0] tv_rgb;
+wire tv_hs, tv_vs, tv_de, tv_field;
+wire [1:0] tv_filter_mode = status[27:26] == 2'd0 ? 2'd2 :
+                            status[27:26] == 2'd1 ? 2'd1 :
+                            status[27:26] == 2'd2 ? 2'd0 : 2'd2;
+(* altera_attribute="-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS", preserve, dont_merge *) reg [1:0] tv_filter_meta=2, tv_filter_sync=2;
+always @(posedge clk_sys) begin
+	tv_filter_meta <= tv_filter_mode;
+	tv_filter_sync <= tv_filter_meta;
+end
+
+pll_tv tv525_pll (
+	.refclk(CLK_50M), .rst(1'b0), .outclk_0(clk_tv525), .locked(tv_pll_locked)
+);
+reg [1:0] tv_reset_pipe = 2'b11;
+always @(posedge clk_tv525 or negedge tv_pll_locked) begin
+	if (!tv_pll_locked) tv_reset_pipe <= 2'b11;
+	else tv_reset_pipe <= {tv_reset_pipe[0], 1'b0};
+end
+
+reg source_de_d=0, source_first_line=1, source_active_d=0;
+wire tv_source_ce = clk16_en_p;
+wire tv_source_line = tv_source_ce && vid_de && !source_de_d;
+wire tv_source_frame = tv_source_line && source_first_line;
+always @(posedge clk_sys) begin
+	source_active_d <= _vblank;
+	if (!n_reset) begin
+		source_de_d <= 1'b0;
+		source_first_line <= 1'b1;
+	end else begin
+		if (_vblank && !source_active_d) source_first_line <= 1'b1;
+		if (tv_source_ce) begin
+			source_de_d <= vid_de;
+			if (tv_source_line) source_first_line <= 1'b0;
+		end
+	end
+end
+
+reg tv_mem_reset_meta=1, tv_mem_reset=1;
+always @(posedge clk_mem) begin
+	tv_mem_reset_meta <= !pll_locked;
+	tv_mem_reset <= tv_mem_reset_meta;
+end
+
+tv525_pipeline #(.FILTER_ENABLE(1), .SOURCE_WIDTH(512), .SOURCE_HEIGHT(342)) crt_tv (
+	.clk_source(clk_sys), .source_reset(!n_reset), .source_ce(tv_source_ce),
+	.source_de(vid_de), .source_line(tv_source_line), .source_frame(tv_source_frame),
+	.source_width(10'd512), .source_height(9'd342),
+	.source_rgb({24{pixelOut}}), .filter_mode(tv_filter_sync),
+	.clk_mem(clk_mem), .inhibit(tv_mem_reset),
+	.clk_tv(clk_tv525), .reset_tv(tv_reset_pipe[1]),
+	.rgb(tv_rgb), .hs(tv_hs), .vs(tv_vs), .de(tv_de), .field_id(tv_field), .csync_n(),
+	.address(DDRAM_ADDR), .burstcount(DDRAM_BURSTCNT), .writedata(DDRAM_DIN),
+	.byteenable(DDRAM_BE), .read(DDRAM_RD), .write(DDRAM_WE),
+	.waitrequest(DDRAM_BUSY), .readdatavalid(DDRAM_DOUT_READY), .readdata(DDRAM_DOUT),
+	.published(), .dropped(), .repeated(), .overflows(), .underruns()
+);
+assign DDRAM_CLK = clk_mem;
+assign CLK_VIDEO = clk_tv525;
+assign CE_PIXEL = 1'b1;
+assign {VGA_R, VGA_G, VGA_B} = tv_rgb;
+assign VGA_DE = tv_de;
+assign VGA_VS = tv_vs;
+assign VGA_HS = tv_hs;
+assign VGA_F1 = tv_field;
+`else
 assign CLK_VIDEO = clk_sys;
 assign CE_PIXEL  = clk16_en_p;	// the 15.6672 MHz dot clock, as the SE/30 core
 
@@ -326,6 +399,7 @@ assign VGA_DE = vid_de;
 assign VGA_VS = vsync;
 assign VGA_HS = hsync;
 assign VGA_F1 = 0;
+`endif
 assign VGA_SL = 0;
 
 wire [10:0] audio;

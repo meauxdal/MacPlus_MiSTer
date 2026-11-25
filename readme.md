@@ -77,6 +77,8 @@ At 8 MHz with the 68000, the core runs at the speed of a real machine: the CPU c
 
 The core outputs the Mac's own 512x342 picture at the real 22.25 kHz / 60.15 Hz, and the MiSTer scaler sizes it for the display. Scale set to V-Integer gives a sharp 3x picture on a 1080p display. A VGA monitor that cannot sync to 22 kHz needs `vga_scaler=1` in the `[MacPlus]` section of MiSTer.ini.
 
+An optional 480i TV output build is available as `MacPlus_TV525.qpf`. It uses the MiSTer DDRAM frame store to generate a 525-line interlaced output; its Video page includes the Strong, Mild and Off deflicker choices. The standard `MacPlus.qpf` build retains the native Macintosh raster. The TV525 build is experimental and has not yet been built or qualified on hardware.
+
 ## Memory
 
 1MB and 4MB memory configurations are available on the Plus and the SE; the other models had their RAM soldered down and always report their own size. Cold boot with 4MB RAM selected takes some time before it starts to boot from FDD/SCSI, so be patient. Warm boot won't take as long.
