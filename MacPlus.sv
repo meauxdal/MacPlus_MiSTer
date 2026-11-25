@@ -60,10 +60,10 @@ video_freak video_freak
 `include "build_id.v" 
 localparam CONF_STR = {
 	"MACPLUS;UART115200;",
-	"S2,DSKMO*,Mount Pri Floppy;",
-	"S3,DSKMO*,Mount Sec Floppy;",
-	// acts like a disk's write-protect tab: sampled at insert, so toggling it
-	// affects only the next mount (MacLC475's "Floppy lock" behavior)
+	"S2,DSKIM*MO*,Mount Pri Floppy;",
+	"S3,DSKIM*MO*,Mount Sec Floppy;",
+	// acts like a disk's write-protect tab. 
+	// Sampled at insert; toggling it only affects the next mount
 	"O9,Floppy Write Protect,Off,On;",
 	"-;",
 	// D0: greyed out on a model with no SCSI bus (status_menumask bit 0)
@@ -84,17 +84,16 @@ localparam CONF_STR = {
 	"D1O4,Memory,1MB,4MB;",
 	"O5,Speed,8MHz,16MHz;",
 	"-;",
-	"P1,Video;",
-	"P2,Advanced;",
-	"-;",
-	// shown while Model, CPU or Memory differ from what the last reset
-	// latched (status_menumask bit 2, as in MacLC.sv)
-	"h2-,Changes pending;",
-	"R0,Reset & Apply CPU+Memory;",
 
+	// Each page's items follow its header: with all pages expanded (` or
+	// Select), Main lists items in CONF_STR order.
+	"P1,Video;",
+	"P1-;",
 	"P1O78,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
 
+	"P2,Advanced;",
+	"P2-;",
 	// the 256 PRAM bytes, kept across core loads (PRAM image block below);
 	// MacLC.sv has the same slot
 	"P2SC6,NVR,PRAM image;",
@@ -113,6 +112,12 @@ localparam CONF_STR = {
 	"P2-;",
 	// bit 17, not the freed bit 6: a saved "Floppy Write On" left bit 6 set
 	"P2OH,Swap Alt/Win keys,No,Yes;",
+	"-;",
+
+	// shown while Model, CPU or Memory differ from what the last reset
+	// latched (status_menumask bit 2, as in MacLC.sv)
+	"h2-,Changes pending;",
+	"R0,Reset & Apply CPU+Memory;",
 
 	// Menu pages only regroup the items; every status bit is unchanged, so
 	// saved settings carry over without a config version bump.
